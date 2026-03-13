@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Клиент для БЕСПЛАТНОЙ Gemini
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("GEMINI_API_KEY"),
@@ -22,56 +21,70 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бесплатная Nano Banana запущена!\nПришлите фото для мемориального портрета.")
+    await message.answer("✅ Бот Nano Banana готов! Пришлите фото (полностью бесплатно).")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (Бесплатная Gemini)...")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ фото (бесплатные модели)...")
     
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
     
+    # Список БЕСПЛАТНЫХ моделей на OpenRouter
+    free_models = [
+        "google/gemini-2.0-flash-001", 
+        "google/gemini-flash-1.5-8b",
+        "meta-llama/llama-3.2-11b-vision-instruct:free"
+    ]
+    
+    person_desc = None
+    for model_id in free_models:
+        try:
+            logging.info(f"Пробую бесплатную модель: {model_id}")
+            analysis = await client.chat.completions.create(
+                model=model_id,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this person's face very briefly for a portrait. Max 30 words."},
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                    ]
+                }],
+                timeout=20.0
+            )
+            person_desc = analysis.choices[0].message.content
+            if person_desc:
+                break
+        except Exception as e:
+            logging.warning(f"Модель {model_id} не сработала: {e}")
+            continue
+
+    if not person_desc:
+        await status_msg.edit_text("❌ Не удалось проанализировать фото через бесплатные модели. Проверьте ключ OpenRouter.")
+        return
+
     try:
-        # 1. Используем БЕСПЛАТНУЮ модель Gemini для анализа
-        analysis = await client.chat.completions.create(
-            model="google/gemini-2.0-flash-exp:free",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "Describe this person's face very briefly for a portrait. Focus on eyes, hair, and chin. Max 40 words."},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
-                ]
-            }]
-        )
-        
-        person_desc = analysis.choices[0].message.content
-        await status_msg.edit_text("⌛ Шаг 2: Бесплатная генерация портрета...")
+        await status_msg.edit_text("⌛ Шаг 2: Генерация портрета (Pollinations AI)...")
 
-        # 2. Формируем промпт и используем бесплатный движок Pollinations
-        raw_prompt = (
-            f"Hyper-realistic professional memorial photo of {person_desc}, "
-            f"wearing formal grey shirt, neutral studio grey background, "
-            f"black mourning ribbon in bottom right corner, sharp focus, 8k."
-        )
+        # Формируем промпт для рисования
+        prompt = (f"Professional studio memorial portrait of {person_desc}, "
+                  f"wearing formal grey shirt, neutral grey background, "
+                  f"black mourning ribbon in bottom right corner, highly detailed, 8k.")
         
-        # Кодируем текст для URL
-        encoded_prompt = urllib.parse.quote(raw_prompt)
-        # Генерируем ссылку на картинку (каждый раз новая благодаря seed)
-        seed = message.message_id 
-        image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux"
+        encoded_prompt = urllib.parse.quote(prompt)
+        # Используем модель FLUX (самая современная бесплатная)
+        image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={message.message_id}&model=flux"
 
-        # 3. Отправляем результат
         await bot.send_photo(
             message.chat.id, 
             photo=image_url, 
-            caption=f"✅ Ретушь готова (бесплатно)!\n\nОписание: {person_desc[:100]}..."
+            caption="✨ Ретушь выполнена!\n\nЕсли лицо не похоже, попробуйте еще раз с более четким исходным фото."
         )
         await status_msg.delete()
         
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
+        await message.answer(f"❌ Ошибка на шаге генерации: {str(e)[:100]}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
