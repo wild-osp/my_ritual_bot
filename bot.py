@@ -7,14 +7,12 @@ from aiogram.filters import Command
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Инициализация клиента OpenRouter
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=os.getenv("GEMINI_API_KEY"), # Убедись, что тут ключ от OpenRouter (sk-or-v1-...)
+    api_key=os.getenv("GEMINI_API_KEY"),
 )
 
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
@@ -22,74 +20,51 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот Nano Banana (Gemini) запущен через OpenRouter!\nПришлите фото для ритуальной ретуши.")
+    await message.answer("✅ Бот ритуальной ретуши готов! Пришлите фото, и я создам портрет.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Связываюсь с нейросетью... Пробую доступные модели.")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ лица...")
     
-    # 1. Скачиваем фото из Telegram
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
     
-    # 2. Список моделей для перебора (OpenRouter часто меняет их доступность)
-    models_to_try = [
-        "google/gemini-2.0-flash-001",    # Самая новая и быстрая
-        "google/gemini-flash-1.5",        # Стандартная Nano Banana
-        "google/gemini-2.0-flash-exp:free" # Бесплатная экспериментальная
-    ]
-    
-    final_response = None
-    
     try:
-        for model_id in models_to_try:
-            try:
-                logging.info(f"🔄 Попытка через модель: {model_id}")
-                
-                response = await client.chat.completions.create(
-                    model=model_id,
-                    messages=[
-                        {
-                            "role": "user",
-                            "content": [
-                                {
-                                    "type": "text", 
-                                    "text": "Memorial portrait retouch task: Extract the person, place on a neutral studio grey background, change clothes to a formal grey shirt, add a black diagonal mourning ribbon in the bottom right corner. Describe the result."
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}
-                                },
-                            ],
-                        }
-                    ],
-                    timeout=30.0
-                )
-                
-                if response and response.choices[0].message.content:
-                    final_response = response.choices[0].message.content
-                    logging.info(f"✅ Успех с моделью: {model_id}")
-                    break # Выходим из цикла, если получили ответ
-                    
-            except Exception as e:
-                logging.warning(f"⚠️ Модель {model_id} недоступна: {e}")
-                continue # Пробуем следующую
+        # 1. Gemini анализирует фото и создает описание для генератора
+        analysis = await client.chat.completions.create(
+            model="google/gemini-2.0-flash-001",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this person's face in detail for high-quality recreation. Focus on age, hair, and features. Output ONLY the description."},
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
+                ]
+            }]
+        )
+        
+        person_desc = analysis.choices[0].message.content
+        await status_msg.edit_text("⌛ Шаг 2: Генерация ретушированного портрета...")
 
-        # 3. Выдача результата пользователю
-        if final_response:
-            await message.answer(f"✨ **Результат обработки:**\n\n{final_response}", parse_mode="Markdown")
-        else:
-            await message.answer("❌ К сожалению, все доступные модели Gemini на OpenRouter сейчас выдали ошибку. Проверьте баланс/лимиты аккаунта OpenRouter.")
-            
+        # 2. Генерируем новое изображение (используем OpenAI DALL-E 3 через OpenRouter)
+        # Если на балансе OpenRouter нет средств, используй бесплатную модель "google/gemini-2.0-pro-exp-02-05:free"
+        image_response = await client.images.generate(
+            model="openai/dall-e-3", 
+            prompt=f"A hyper-realistic memorial portrait of {person_desc}. The person is wearing a clean formal grey shirt. Neutral studio grey background. A black diagonal mourning ribbon is in the bottom right corner. Soft studio lighting, 8k resolution, professional photography.",
+            size="1024x1024"
+        )
+
+        image_url = image_response.data[0].url
+        
+        # 3. Отправляем готовое фото
+        await bot.send_photo(message.chat.id, photo=image_url, caption="✅ Ретушь готова!")
         await status_msg.delete()
         
     except Exception as e:
-        logging.error(f"Критическая ошибка: {e}")
-        await message.answer(f"💥 Произошла системная ошибка: {e}")
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка генерации: {e}\n(Убедитесь, что на OpenRouter есть баланс для DALL-E 3)")
 
 async def main():
-    logging.info("🚀 Бот запущен и готов к работе!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
