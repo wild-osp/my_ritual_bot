@@ -7,77 +7,58 @@ from google import genai
 from google.genai import types as genai_types
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Ключи (должны быть прописаны в панели Bothost)
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+# Инициализируем клиент БЕЗ жесткого указания v1, 
+# чтобы библиотека сама выбрала актуальный путь
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
-# Инициализация клиента с явным указанием стабильной версии API v1
-client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={'api_version': 'v1'}
-)
-
-bot = Bot(token=TELEGRAM_TOKEN)
+bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот ритуальной ретуши активен! Пришлите фото, и я опишу необходимые правки (подготовка к генерации).")
+    await message.answer("✅ Бот готов! Отправьте фото для ретуши.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Фото получено. Связываюсь с нейросетью Gemini 1.5 Flash...")
+    status_msg = await message.answer("⌛ Обработка нейросетью...")
     
-    # 1. Получаем файл из Telegram
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     
     try:
-        # 2. Формируем части запроса
-        prompt_text = (
-            "Ritual retouch task: extract the person from the photo. "
-            "Place them on a neutral professional studio grey background. "
-            "Change their clothes to a formal grey shirt. "
-            "Add a black diagonal mourning ribbon in the bottom right corner. "
-            "Keep the face features realistic and sharp."
-        )
+        # Используем полное имя модели. Иногда это решает проблему 404.
+        # Если не сработает, заменим на "models/gemini-1.5-flash-latest"
+        model_id = "gemini-1.5-flash" 
         
-        prompt_part = genai_types.Part.from_text(text=prompt_text)
-        image_part = genai_types.Part.from_bytes(
-            data=photo_content.getvalue(), 
-            mime_type="image/jpeg"
+        prompt = (
+            "Ritual retouch: extract person, neutral studio grey background, "
+            "formal grey shirt, black mourning ribbon in corner."
         )
 
-        # 3. Отправляем запрос (используем Content объект для исключения ошибок валидации)
         response = client.models.generate_content(
-            model="gemini-1.5-flash",
+            model=model_id,
             contents=[
-                genai_types.Content(
-                    role="user", 
-                    parts=[prompt_part, image_part]
-                )
+                genai_types.Part.from_text(text=prompt),
+                genai_types.Part.from_bytes(data=photo_content.getvalue(), mime_type="image/jpeg")
             ]
         )
         
-        # 4. Выдаем результат
         if response.text:
-            await message.answer(f"✨ **Анализ ретуши выполнен:**\n\n{response.text}", parse_mode="Markdown")
+            await message.answer(f"✨ Результат:\n{response.text}")
         else:
-            await message.answer("Нейросеть обработала изображение, но не смогла сформулировать ответ.")
+            await message.answer("Нейросеть ответила, но текст пуст.")
             
         await status_msg.delete()
         
     except Exception as e:
         logging.error(f"Ошибка Gemini: {e}")
-        await message.answer(f"❌ Ошибка: {e}")
+        # Если ошибка 404 повторится, бот сам предложит решение в тексте
+        await message.answer(f"❌ Ошибка 404 или API: {e}\nПопробуйте перезапустить бота через минуту.")
 
 async def main():
-    logging.info("🚀 Сброс вебхуков и запуск Polling...")
-    # Очищаем старые сообщения, чтобы бот не завис
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
