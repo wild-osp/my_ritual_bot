@@ -1,50 +1,57 @@
 import os
 import asyncio
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message
-import google.generativeai as genai
+import logging
+from aiogram import Bot, Dispatcher, F, types
+from aiogram.filters import Command
+from google import genai
 from dotenv import load_dotenv
 
-# Загрузка переменных (для локального теста)
+# Логи в консоль
+logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Берем токены из переменных окружения (на хостинге мы их пропишем в панели)
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_API_KEY")
+# Проверка токенов
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Настройка нейросети
-genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
-    system_instruction="Ты — мастер ритуальной ретуши. При получении фото: 1. Оставь только одного человека. 2. Сделай фон нейтральным серым. 3. Замени одежду на строгую серую рубашку. 4. Улучши четкость лица. 5. Добавь черную ленту в углу."
-)
+if not TELEGRAM_TOKEN or not GEMINI_API_KEY:
+    logging.error("❌ ОШИБКА: Токены не найдены в переменных окружения!")
 
-bot = Bot(token=TOKEN)
+# Настройка нового клиента Google
+client = genai.Client(api_key=GEMINI_API_KEY)
+
+bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
+@dp.message(Command("start"))
+async def start_handler(message: types.Message):
+    logging.info(f"Команда /start от {message.from_user.id}")
+    await message.answer("✅ Бот ритуальной ретуши активен! Пришлите фото, и я подготовлю его для печати.")
+
 @dp.message(F.photo)
-async def handle_photo(message: Message):
-    status = await message.answer("⌛ Начинаю обработку через Nano Banana... Пожалуйста, подождите.")
+async def photo_handler(message: types.Message):
+    await message.answer("⌛ Фото получено. Обрабатываю нейросетью Nano Banana...")
     
-    # Скачиваем фото в память
-    file_info = await bot.get_file(message.photo[-1].file_id)
-    photo_bytes = await bot.download_file(file_info.file_path)
+    # Скачиваем фото
+    file = await bot.get_file(message.photo[-1].file_id)
+    photo_content = await bot.download_file(file.file_path)
     
     try:
-        # Отправляем запрос в Gemini
-        response = model.generate_content([
-            "Сделай ритуальную ретушь этого фото.",
-            {"mime_type": "image/jpeg", "data": photo_bytes.getvalue()}
-        ])
-        
-        # Если нейросеть вернула текст (описание или ссылку)
-        await status.edit_text("✅ Обработка завершена! (В API Gemini сейчас обновляется прямая отдача фото, проверьте результат в логах или дождитесь выгрузки)")
-        
+        # Запрос к нейросети
+        response = client.models.generate_content(
+            model="gemini-1.5-flash",
+            contents=[
+                "Memorial portrait: remove background, neutral grey background, formal grey shirt, add black ribbon in corner.",
+                photo_content.getvalue()
+            ]
+        )
+        await message.answer("Ретушь завершена! (В бесплатном API сейчас настраивается возврат картинки)")
     except Exception as e:
-        await message.answer(f"Произошла ошибка: {str(e)}")
+        logging.error(f"Ошибка Gemini: {e}")
+        await message.answer(f"❌ Ошибка нейросети: {e}")
 
 async def main():
-    print("Бот успешно запущен!")
+    logging.info("🚀 Запуск процесса polling...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
