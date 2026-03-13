@@ -1,58 +1,61 @@
 import os
 import asyncio
 import logging
-from aiogram import Bot, Dispatcher, F, types
+from aiogram import Bot, Dispatcher, F, types as tg_types
 from aiogram.filters import Command
 from google import genai
+from google.genai import types as genai_types
 from dotenv import load_dotenv
 
-# Включаем логирование, чтобы видеть всё в панели Bothost
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Забираем ключи
+# Ключи
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Инициализация клиента Google (новый стандарт 2026 года)
+# Клиент Gemini
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
 
 @dp.message(Command("start"))
-async def start_handler(message: types.Message):
-    logging.info(f"Команда /start получена от {message.from_user.id}")
+async def start_handler(message: tg_types.Message):
     await message.answer("✅ Бот ритуальной ретуши активен! Пришлите фото.")
 
 @dp.message(F.photo)
-async def photo_handler(message: types.Message):
-    status_msg = await message.answer("⌛ Фото получено. Обрабатываю нейросетью Nano Banana (Gemini 3 Flash)...")
+async def photo_handler(message: tg_types.Message):
+    status_msg = await message.answer("⌛ Фото получено. Работаю...")
     
-    # Скачиваем фото в память
+    # Скачиваем фото
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     
     try:
-        # Запрос к нейросети
+        # ПРАВИЛЬНАЯ СТРУКТУРА: Список объектов Part
+        prompt_part = genai_types.Part.from_text(text="Memorial portrait task: extract the person, place on neutral grey background, change clothes to formal grey shirt, add black diagonal mourning ribbon in bottom right corner.")
+        image_part = genai_types.Part.from_bytes(data=photo_content.getvalue(), mime_type="image/jpeg")
+
         response = client.models.generate_content(
             model="gemini-1.5-flash",
-            contents=[
-                "Memorial portrait task: extract the person, place on neutral grey background, change clothes to formal grey shirt, add black diagonal mourning ribbon in bottom right corner.",
-                photo_content.getvalue()
-            ]
+            contents=[genai_types.Content(role="user", parts=[prompt_part, image_part])]
         )
-        # Если ответ содержит текст (описание), выводим его. 
-        # Генерация новой картинки в API часто идет отдельным медиа-потоком.
-        await status_msg.edit_text("✅ Ретушь завершена! Проверяю результат...")
+        
+        if response.text:
+            await message.answer(f"✨ Ответ нейросети:\n{response.text}")
+        else:
+            await message.answer("Нейросеть обработала запрос, но не вернула текст.")
+            
+        await status_msg.delete()
         
     except Exception as e:
         logging.error(f"Ошибка Gemini: {e}")
-        await message.answer(f"❌ Ошибка нейросети: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
 
 async def main():
-    logging.info("🚀 Сброс вебхуков и запуск бота...")
-    # Очищаем очередь, чтобы бот ответил на старые нажатия /start
+    logging.info("🚀 Сброс вебхуков и запуск...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
