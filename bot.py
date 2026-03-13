@@ -2,16 +2,16 @@ import os
 import asyncio
 import logging
 import base64
+import urllib.parse
 from aiogram import Bot, Dispatcher, F, types as tg_types
 from aiogram.filters import Command
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Инициализация клиента OpenRouter
+# Клиент для БЕСПЛАТНОЙ Gemini
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("GEMINI_API_KEY"),
@@ -22,67 +22,58 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот ритуальной ретуши Nano Banana активен!\nПришлите фото, и я создам мемориальный портрет.")
+    await message.answer("✅ Бесплатная Nano Banana запущена!\nПришлите фото для мемориального портрета.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Анализ черт лица...")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (Бесплатная Gemini)...")
     
-    # Скачиваем фото
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
     
     try:
-        # 1. Gemini анализирует лицо (просим очень кратко, чтобы не превысить лимиты текста)
+        # 1. Используем БЕСПЛАТНУЮ модель Gemini для анализа
         analysis = await client.chat.completions.create(
-            model="google/gemini-2.0-flash-001",
+            model="google/gemini-2.0-flash-exp:free",
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe this person's facial features and hair very briefly for a realistic portrait recreation. Max 60 words."},
+                    {"type": "text", "text": "Describe this person's face very briefly for a portrait. Focus on eyes, hair, and chin. Max 40 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
                 ]
             }]
         )
         
         person_desc = analysis.choices[0].message.content
-        await status_msg.edit_text("⌛ Шаг 2: Генерация портрета (DALL-E 3)...")
+        await status_msg.edit_text("⌛ Шаг 2: Бесплатная генерация портрета...")
 
-        # 2. Генерация изображения по описанию
-        # Используем DALL-E 3 для максимального сходства и качества
-        prompt = (
-            f"A high-quality hyper-realistic memorial portrait of {person_desc}. "
-            f"The person is wearing a clean formal grey shirt. "
-            f"Background is a neutral professional studio grey. "
-            f"A black diagonal mourning ribbon is in the bottom right corner. "
-            f"Soft cinematic lighting, professional photography, 8k resolution."
+        # 2. Формируем промпт и используем бесплатный движок Pollinations
+        raw_prompt = (
+            f"Hyper-realistic professional memorial photo of {person_desc}, "
+            f"wearing formal grey shirt, neutral studio grey background, "
+            f"black mourning ribbon in bottom right corner, sharp focus, 8k."
         )
-
-        image_response = await client.images.generate(
-            model="openai/dall-e-3",
-            prompt=prompt,
-            size="1024x1024"
-        )
-
-        image_url = image_response.data[0].url
         
-        # 3. Отправка результата
+        # Кодируем текст для URL
+        encoded_prompt = urllib.parse.quote(raw_prompt)
+        # Генерируем ссылку на картинку (каждый раз новая благодаря seed)
+        seed = message.message_id 
+        image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={seed}&model=flux"
+
+        # 3. Отправляем результат
         await bot.send_photo(
             message.chat.id, 
             photo=image_url, 
-            caption="✅ Ретушь выполнена нейросетью Nano Banana."
+            caption=f"✅ Ретушь готова (бесплатно)!\n\nОписание: {person_desc[:100]}..."
         )
         await status_msg.delete()
         
     except Exception as e:
-        logging.error(f"Ошибка в процессе: {e}")
-        # Обрезаем текст ошибки до 400 символов, чтобы не упасть при отправке в Telegram
-        safe_error_message = str(e)[:400]
-        await message.answer(f"❌ Произошла ошибка: {safe_error_message}\n\nПроверьте баланс на OpenRouter.")
+        logging.error(f"Ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:200]}")
 
 async def main():
-    logging.info("🚀 Бот запущен через OpenRouter...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
