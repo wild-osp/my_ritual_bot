@@ -1,4 +1,3 @@
 aiogram
 openai
 python-dotenv
-aiohttp
