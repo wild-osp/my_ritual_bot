@@ -11,43 +11,59 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Официальный клиент Google
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 
+# Список моделей для перебора (от лучшей к самой доступной)
+MODEL_VARIANTS = ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-8b']
+
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот Nano Banana переключен на стабильную версию 1.5 Flash!\nПришлите фото.")
+    await message.answer("🍌 Nano Banana на связи! Пытаюсь пробиться через квоты Google...\nПришлите фото.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (Gemini 1.5 Flash)...")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (подбираю свободную модель)...")
     
-    try:
-        file = await bot.get_file(message.photo[-1].file_id)
-        photo_stream = await bot.download_file(file.file_path)
-        image_bytes = photo_stream.getvalue()
-        
-        # 1. Используем СТАБИЛЬНУЮ модель 1.5 Flash вместо 2.0
-        vision_response = client.models.generate_content(
-            model='gemini-1.5-flash', # Поменяли версию здесь
-            contents=[
-                types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
-                'Describe face features, age and hair color briefly. Max 15 words.'
-            ]
-        )
-        person_desc = vision_response.text.strip()
-        
-        await status_msg.edit_text("⌛ Шаг 2: Генерация через Imagen 3...")
+    file = await bot.get_file(message.photo[-1].file_id)
+    photo_stream = await bot.download_file(file.file_path)
+    image_bytes = photo_stream.getvalue()
+    
+    person_desc = None
+    
+    # Пытаемся достучаться хоть до какой-то модели
+    for model_name in MODEL_VARIANTS:
+        try:
+            logging.info(f"Пробую модель: {model_name}")
+            vision_response = client.models.generate_content(
+                model=model_name,
+                contents=[
+                    types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'),
+                    'Describe face and hair very briefly. Max 10 words.'
+                ]
+            )
+            person_desc = vision_response.text.strip()
+            if person_desc:
+                logging.info(f"✅ Успех с моделью {model_name}")
+                break
+        except Exception as e:
+            logging.warning(f"❌ {model_name} отказала: {str(e)[:50]}")
+            continue
 
-        # 2. Промпт для Imagen
+    if not person_desc:
+        await status_msg.edit_text("❌ Все модели Google сейчас недоступны (Quota 0). Попробуйте через 10-15 минут.")
+        return
+
+    await status_msg.edit_text("⌛ Шаг 2: Генерация портрета (Imagen 3)...")
+
+    try:
+        # Промпт для Imagen
         prompt = (f"A professional memorial portrait of {person_desc}, "
                   f"wearing a formal grey shirt, neutral studio grey background, "
                   f"black diagonal mourning ribbon in bottom right corner, 8k resolution.")
 
-        # Генерируем изображение
         image_response = client.models.generate_images(
             model='imagen-3.0-generate-001',
             prompt=prompt,
@@ -64,14 +80,8 @@ async def photo_handler(message: tg_types.Message):
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Ошибка API: {e}")
-        # Если ошибка в квотах, выводим понятное сообщение
-        if "429" in str(e):
-            await message.answer("⚠️ Google временно ограничил лимиты. Пожалуйста, подождите 1 минуту и попробуйте снова.")
-        elif "imagen" in str(e).lower():
-            await message.answer("❌ Вашему аккаунту Google AI Studio еще не разрешено генерировать картинки. Обычно доступ открывается через пару часов после создания ключа.")
-        else:
-            await message.answer(f"❌ Ошибка: {str(e)[:150]}")
+        logging.error(f"Ошибка Imagen: {e}")
+        await message.answer("❌ Анализ прошел, но Imagen 3 пока не дает рисовать. Попробуйте чуть позже, Google активирует квоты постепенно.")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
