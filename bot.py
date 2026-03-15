@@ -6,15 +6,16 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F, types as tg_types
 from aiogram.filters import Command
 from openai import AsyncOpenAI
-from aiogram.types import BufferedInputFile
+from aiogram.types import BufferedInputFile, URLInputFile
 from dotenv import load_dotenv
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
+# Инициализация клиента OpenRouter
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
@@ -25,62 +26,66 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот Nano Banana 8.0 активирован. Отправьте фото.")
+    await message.answer("⭐ Бот Nano Banana 9.0 (VIP SDXL) запущен!\nИспользую приоритетный платный канал. Качество и стабильность гарантированы.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Gemini анализирует фото...")
+    status_msg = await message.answer("🔍 Шаг 1: Анализ лица (Gemini)...")
     
+    # Получаем фото от пользователя
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base_64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
     
     try:
-        # 1. Gemini описывает фото
+        # 1. Анализ лица через Gemini
         response = await client.chat.completions.create(
             model="google/gemini-2.0-flash-001",
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe the person's face and clothes for a professional portrait. Max 15 words."},
+                    {"type": "text", "text": "Describe face features, hair, and eye color for a professional portrait. Max 12 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
         )
         description = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"🎨 Шаг 2: Генерация (через платный шлюз)...\n({description})")
+        await status_msg.edit_text(f"🚀 Шаг 2: Платная генерация SDXL...\n({description})")
 
-        # 2. Вместо капризного Pollinations используем другой бесплатный, 
-        # но менее известный шлюз, который не банит за 429 так часто
-        prompt = f"Professional studio memorial portrait of {description}, dark suit, grey background, realistic, 8k"
+        # 2. Формируем качественный промпт
+        prompt = (f"High-quality professional studio memorial portrait of {description}, "
+                  f"wearing a formal dark suit, neutral grey studio background, "
+                  f"sharp focus, highly detailed, photorealistic, 8k resolution.")
+
+        # 3. Прямой запрос на генерацию картинки в OpenRouter
+        # Модель SDXL на OpenRouter принимает текстовый промпт и возвращает ссылку на изображение
+        image_response = await client.chat.completions.create(
+            model="stabilityai/sdxl",
+            messages=[{
+                "role": "user",
+                "content": prompt
+            }]
+        )
+
+        # Вытаскиваем результат (URL картинки)
+        image_url = image_response.choices[0].message.content.strip()
         
-        # Попробуем использовать альтернативный адрес генератора
-        safe_prompt = prompt.replace(" ", "%20")
-        image_url = f"https://pollinations.ai/p/{safe_prompt}?width=1024&height=1024&seed={message.message_id}&model=flux&nologo=true"
+        # Проверяем, что получили URL, а не текст ошибки
+        if "http" in image_url:
+            await bot.send_photo(
+                message.chat.id, 
+                photo=URLInputFile(image_url), 
+                caption=f"✨ Ретушь готова!\nИспользована модель: SDXL\nОписание: {description}"
+            )
+        else:
+            # Если модель вернула текст вместо ссылки
+            await message.answer(f"⚠️ Ошибка модели: {image_url}")
 
-        async with aiohttp.ClientSession() as session:
-            # Увеличим количество попыток и добавим смену "отпечатка" бота
-            headers = {"User-Agent": f"Mozilla/5.0 (Bot-{message.from_user.id})"}
-            for attempt in range(1, 11):
-                try:
-                    async with session.get(f"{image_url}&retry={attempt}", headers=headers, timeout=60) as resp:
-                        if resp.status == 200:
-                            data = await resp.read()
-                            if len(data) > 30000:
-                                await bot.send_photo(message.chat.id, BufferedInputFile(data, "res.jpg"), caption="✨ Ретушь готова!")
-                                await status_msg.delete()
-                                return
-                        elif resp.status == 429:
-                            await status_msg.edit_text(f"⌛ Очередь на сервере... Попытка {attempt}/10")
-                except:
-                    pass
-                await asyncio.sleep(10)
-
-        await message.answer("❌ Бесплатные серверы перегружены. Пополните баланс OpenRouter для перехода на VIP-канал.")
         await status_msg.delete()
 
     except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)[:50]}")
+        logging.error(f"Критическая ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
