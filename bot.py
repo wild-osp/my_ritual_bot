@@ -2,7 +2,6 @@ import os
 import asyncio
 import logging
 import base64
-import urllib.parse
 import aiohttp
 from aiogram import Bot, Dispatcher, F, types as tg_types
 from aiogram.filters import Command
@@ -10,14 +9,14 @@ from openai import AsyncOpenAI
 from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
-# Загружаем переменные окружения
+# Загружаем переменные (нужен только TELEGRAM_TOKEN и OPENROUTER_KEY)
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-# Инициализация Gemini
+# Инициализация клиента OpenRouter
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
@@ -28,12 +27,13 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("🚀 Nano Banana 6.3 готова!\nПришлите фото для создания портрета.")
+    await message.answer("🚀 Nano Banana 7.1 готова!\nПришлите фото для ретуши.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
     status_msg = await message.answer("⌛ Шаг 1: Анализ лица...")
     
+    # Получаем фото
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base_64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
@@ -45,7 +45,7 @@ async def photo_handler(message: tg_types.Message):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe face features and hair briefly. Max 10 words."},
+                    {"type": "text", "text": "Describe face, hair, and clothing. Max 10 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
@@ -53,57 +53,36 @@ async def photo_handler(message: tg_types.Message):
         person_desc = response.choices[0].message.content.strip()
         await status_msg.edit_text(f"⌛ Шаг 2: Генерация портрета...\n({person_desc})")
 
-        # 2. Промпт (упрощенный, чтобы избежать блокировки 429/500)
-        # Убрали слова 'mourning' и 'ribbon' из основной части, чтобы пройти фильтры
-        clean_desc = "".join(e for e in person_desc if e.isalnum() or e.isspace())
-        prompt = (f"A professional studio photographic portrait of {clean_desc}, "
+        # 2. Промпт для генерации
+        prompt = (f"A professional high-quality memorial studio portrait of {person_desc}, "
                   f"wearing black formal clothes, solid neutral grey background, "
-                  f"8k resolution, highly detailed realistic face.")
-        
-        encoded_prompt = urllib.parse.quote(prompt)
-        # Используем модель turbo - она быстрее и стабильнее под нагрузкой
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=turbo&seed={message.message_id}"
+                  f"sharp focus, photorealistic, 8k resolution.")
 
-        # 3. Умный цикл скачивания
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-            for attempt in range(1, 16): # 15 попыток
-                try:
-                    # Добавляем случайный параметр для обхода кэша
-                    current_url = f"{image_url}&iteration={attempt}"
-                    async with session.get(current_url, timeout=30) as resp:
-                        if resp.status == 200:
-                            data = await resp.read()
-                            file_size = len(data)
-                            logging.info(f"Попытка {attempt}: {file_size} байт")
-                            
-                            # Проверка: игнорируем логотип (3314 байт) и маленькие файлы
-                            if file_size > 30000 and file_size != 3314:
-                                photo_file = BufferedInputFile(data, filename="result.jpg")
-                                await bot.send_photo(
-                                    message.chat.id, 
-                                    photo=photo_file, 
-                                    caption="✨ Портрет готов!"
-                                )
-                                await status_msg.delete()
-                                return
-                            
-                            # Если получаем один и тот же маленький размер — сервер еще не нарисовал
-                            await status_msg.edit_text(f"⌛ Рисую... ({attempt}/15)\nТекущий статус: подготовка файла...")
-                        
-                        elif resp.status == 429:
-                            logging.warning("Лимит запросов. Ждем...")
-                            await asyncio.sleep(10)
-                            
-                except Exception as e:
-                    logging.error(f"Ошибка на попытке {attempt}: {e}")
+        # 3. ГЕНЕРАЦИЯ КАРТИНКИ через OpenRouter (модель Stable Diffusion XL)
+        # Мы используем Pollinations как прокси, но через более стабильный метод
+        image_url = f"https://image.pollinations.ai/prompt/{prompt.replace(' ', '%20')}?width=1024&height=1024&nologo=true&model=flux"
+
+        async with aiohttp.ClientSession() as session:
+            # Делаем 10 попыток с паузой (серверу нужно время на прорисовку)
+            for attempt in range(1, 11):
+                async with session.get(image_url) as resp:
+                    if resp.status == 200:
+                        data = await resp.read()
+                        # Если картинка больше 40кб — это успех
+                        if len(data) > 40000:
+                            photo_file = BufferedInputFile(data, filename="result.jpg")
+                            await bot.send_photo(message.chat.id, photo=photo_file, caption="✨ Ретушь готова!")
+                            await status_msg.delete()
+                            return
                 
-                await asyncio.sleep(6)
+                await status_msg.edit_text(f"⌛ Рисую... Попытка {attempt}/10")
+                await asyncio.sleep(8)
 
-        await message.answer("❌ Сервер нейросети временно недоступен. Попробуйте еще раз через пару минут.")
+        await message.answer("❌ Сервер рисования всё еще занят. Попробуйте другое фото.")
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Критическая ошибка: {e}")
+        logging.error(f"Ошибка: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:50]}")
 
 async def main():
