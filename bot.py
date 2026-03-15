@@ -2,40 +2,34 @@ import os
 import asyncio
 import logging
 import base64
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import URLInputFile
 from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Загрузка ключей
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-# Инициализация клиентов
 bot = Bot(token=TELEGRAM_TOKEN)
 dp = Dispatcher()
-client = AsyncOpenAI(
-    base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_KEY,
-)
+client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=OPENROUTER_KEY)
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("✨ **Ритуальная Ретушь 11.0**\n\nПришлите фото человека, и я создам профессиональный студийный портрет для мемориальных целей.")
+    await message.answer("✨ **Ритуальная Ретушь 12.0**\nПришлите фото для обработки.")
 
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
-    status_msg = await message.answer("🔍 Шаг 1: Анализ черт лица...")
+    status_msg = await message.answer("🔍 Шаг 1: Анализ...")
     
     try:
-        # Скачивание и подготовка фото
         file = await bot.get_file(message.photo[-1].file_id)
         photo_content = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(photo_content.getvalue()).decode('utf-8')
@@ -46,50 +40,46 @@ async def photo_handler(message: types.Message):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe age, gender, hair, and face features. Max 12 words."},
+                    {"type": "text", "text": "Describe age, hair, and face features. No punctuation. Max 10 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
                 ]
             }]
         )
-        description = analysis.choices[0].message.content.strip()
-        logger.info(f"Gemini description: {description}")
+        # Очищаем описание от лишних знаков, чтобы не ломать URL
+        description = analysis.choices[0].message.content.strip().replace(".", "").replace(",", "")
+        logger.info(f"Clean description: {description}")
         
-        await status_msg.edit_text(f"🎨 Шаг 2: Создание портрета...\n({description})")
+        await status_msg.edit_text(f"🎨 Шаг 2: Генерация...\n({description})")
 
-        # 2. Формируем промпт
-        prompt = (f"A hyper-realistic professional studio memorial portrait of {description}, "
-                  f"wearing a formal dark suit, neutral grey studio background, "
-                  f"cinematic lighting, sharp focus, 8k resolution, masterpiece.")
+        # 2. Формируем безопасный промпт
+        raw_prompt = f"Professional studio portrait of {description} wearing black suit grey background photorealistic 8k"
+        safe_prompt = urllib.parse.quote(raw_prompt)
 
-        # 3. Платная генерация через OpenRouter (Пробуем универсальный ID)
+        # 3. Пытаемся через OpenRouter (SDXL)
         try:
-            # Используем модель, которая на OpenRouter сейчас лучше всего работает с изображениями
             image_gen = await client.chat.completions.create(
-                model="openai/dall-e-3", # Если на балансе есть $, это приоритет
-                messages=[{"role": "user", "content": prompt}]
+                model="stabilityai/stable-diffusion-xl", 
+                messages=[{"role": "user", "content": raw_prompt}]
             )
-            result_url = image_gen.choices[0].message.content.strip()
-            
-            # Если вернулась ссылка — отправляем
-            if "http" in result_url:
-                clean_url = result_url.split("http")[-1].split()[0].strip("()[]")
-                await bot.send_photo(message.chat.id, photo=URLInputFile("http" + clean_url), caption="✨ Ретушь готова (VIP)")
+            res_url = image_gen.choices[0].message.content.strip()
+            if "http" in res_url:
+                final_url = "http" + res_url.split("http")[-1].split()[0].strip("()[]")
+                await bot.send_photo(message.chat.id, photo=URLInputFile(final_url), caption="✨ Готово (OpenRouter)")
                 await status_msg.delete()
                 return
-        except Exception as e:
-            logger.warning(f"Платный канал недоступен, перехожу на резерв: {e}")
+        except Exception as api_e:
+            logger.warning(f"Платный канал не сработал: {api_e}")
 
-        # 4. Резервный канал (Бесплатный Flux, если платный упал)
-        fallback_url = f"https://pollinations.ai/p/{prompt.replace(' ', '%20')}?width=1024&height=1024&model=flux&nologo=true&seed={message.message_id}"
-        await bot.send_photo(message.chat.id, photo=URLInputFile(fallback_url), caption="✨ Ретушь готова (Standard)")
+        # 4. Резерв через Pollinations (с исправленным URL)
+        fallback_url = f"https://image.pollinations.ai/prompt/{safe_prompt}?width=1024&height=1024&nologo=true"
+        await bot.send_photo(message.chat.id, photo=URLInputFile(fallback_url), caption="✨ Готово (Резерв)")
         await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Критическая ошибка: {e}")
-        await message.answer("❌ Не удалось обработать фото. Попробуйте другое изображение.")
+        logger.error(f"Ошибка: {e}")
+        await message.answer("❌ Ошибка при обработке. Попробуйте еще раз.")
 
 async def main():
-    logger.info("Бот запущен и готов к работе!")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
