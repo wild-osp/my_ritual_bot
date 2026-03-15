@@ -14,7 +14,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-# Настройка клиента
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
@@ -25,11 +24,11 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("🚀 Бот Nano Banana 9.2 VIP готов!\nТеперь мы работаем через прямой канал OpenRouter.")
+    await message.answer("🚀 VIP Бот 9.3 активен!\nМодели обновлены, каналы открыты.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Анализ фото (Gemini)...")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (Gemini)...")
     
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
@@ -42,44 +41,40 @@ async def photo_handler(message: tg_types.Message):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe age, hair, eyes, and clothes. Max 10 words."},
+                    {"type": "text", "text": "Describe face, hair, and clothes. Max 10 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
         )
         description = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"🎨 Шаг 2: Платная генерация (SDXL)...\n({description})")
+        await status_msg.edit_text(f"🎨 Шаг 2: Генерация через Imagen 3...\n({description})")
 
-        # 2. Промпт для ретуши
-        prompt = (f"High-quality professional studio memorial portrait of {description}, "
-                  f"wearing a formal dark suit, neutral grey studio background, "
-                  f"black mourning ribbon in bottom corner, 8k resolution, photorealistic.")
+        # 2. Промпт
+        prompt = (f"A professional studio memorial portrait of {description}, "
+                  f"wearing a formal dark suit, solid grey background, "
+                  f"sharp focus, photorealistic, 8k resolution.")
 
-        # 3. Запрос генерации в OpenRouter
-        # Используем SDXL как самую стабильную и дешевую модель
+        # 3. Запрос генерации (Используем Google Imagen 3 - она очень стабильна)
         image_response = await client.chat.completions.create(
-            model="stabilityai/sdxl",
+            model="google/imagen-3", # Сменили на супер-стабильную модель
             messages=[{"role": "user", "content": prompt}]
         )
 
-        # Вытаскиваем URL из ответа
-        # Платные модели на OpenRouter отдают ссылку прямо в контенте
         image_url = image_response.choices[0].message.content.strip()
-        
-        logging.info(f"Получен ответ от модели: {image_url}")
+        logging.info(f"URL: {image_url}")
 
         if "http" in image_url:
-            # Очистка ссылки от лишних символов (иногда модель добавляет скобки)
-            clean_url = image_url.split("http")[-1]
-            clean_url = "http" + clean_url.split()[0].replace(")", "").replace("]", "").replace(">", "")
+            # Чистим ссылку от возможных артефактов
+            url = image_url.split("http")[-1]
+            url = "http" + url.split()[0].replace(")", "").replace("]", "").replace(">", "")
             
             await bot.send_photo(
                 message.chat.id, 
-                photo=URLInputFile(clean_url), 
-                caption="✨ Ретушь готова!\nСписано с баланса: ~$0.01"
+                photo=URLInputFile(url), 
+                caption=f"✨ Портрет готов!\nОписание: {description}"
             )
         else:
-            await message.answer(f"⚠️ Ошибка: Модель не прислала ссылку. Ответ: {image_url}")
+            await message.answer(f"⚠️ Ошибка модели: {image_url}")
 
         await status_msg.delete()
 
