@@ -26,7 +26,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("✅ Бот готов. Пришлите фото для генерации ретуши.")
+    await message.answer("✅ Бот Nano Banana готов. Пришлите фото.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
@@ -48,26 +48,26 @@ async def photo_handler(message: tg_types.Message):
             }]
         )
         person_desc = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"⌛ Шаг 2: Генерация портрета...\n(Описание: {person_desc})")
+        await status_msg.edit_text(f"⌛ Шаг 2: Генерация...\n({person_desc})")
 
-        prompt = (f"Professional memorial portrait of {person_desc}, "
-                  f"wearing formal dark clothes, studio background, "
-                  f"black mourning ribbon in corner, 8k, realistic.")
-        
+        # Базовый промпт без лишнего мусора
+        clean_desc = "".join(c for c in person_desc if c.isalnum() or c.isspace())
+        prompt = f"Professional memorial portrait of {clean_desc}, formal clothes, grey background, black ribbon, 8k"
         encoded_prompt = urllib.parse.quote(prompt)
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux&seed={message.message_id}"
+        
+        # Ссылка на генерацию (упростили параметры для стабильности)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true"
 
-        # Настройки для стабильного скачивания
-        connector = aiohttp.TCPConnector(ssl=False) # Отключаем капризы SSL
-        timeout = aiohttp.ClientTimeout(total=40) # Увеличиваем время ожидания одного запроса
+        connector = aiohttp.TCPConnector(ssl=False)
+        timeout = aiohttp.ClientTimeout(total=60)
 
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
-            for attempt in range(1, 16): # 15 попыток
+            for attempt in range(1, 15):
                 try:
                     async with session.get(image_url) as resp:
                         if resp.status == 200:
                             data = await resp.read()
-                            if len(data) > 35000:
+                            if len(data) > 30000:
                                 await bot.send_photo(
                                     message.chat.id, 
                                     photo=BufferedInputFile(data, filename="result.jpg"), 
@@ -75,21 +75,19 @@ async def photo_handler(message: tg_types.Message):
                                 )
                                 await status_msg.delete()
                                 return
-                            else:
-                                logging.info(f"Попытка {attempt}: Ждем прорисовку (получен логотип)...")
-                        else:
-                            logging.warning(f"Попытка {attempt}: Статус сервера {resp.status}")
+                        elif resp.status == 500:
+                            logging.error(f"Сервер Pollinations перегружен (500). Попытка {attempt}")
                 except Exception as e:
-                    logging.error(f"Ошибка на попытке {attempt}: {str(e)}")
+                    logging.error(f"Сбой сети: {str(e)}")
                 
-                await asyncio.sleep(6) # Даем серверу время перевести дух
+                await asyncio.sleep(7)
 
-        await message.answer("❌ Сервер генерации не ответил вовремя. Попробуйте еще раз через минуту.")
+        await message.answer("❌ Сервер генерации сейчас перегружен. Попробуйте это же фото еще раз через пару минут.")
         await status_msg.delete()
 
     except Exception as e:
         logging.error(f"Критическая ошибка: {e}")
-        await message.answer(f"❌ Произошла ошибка: {str(e)[:50]}")
+        await message.answer(f"❌ Ошибка: {str(e)[:50]}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
