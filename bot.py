@@ -10,13 +10,14 @@ from openai import AsyncOpenAI
 from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
+# Загружаем переменные
 load_dotenv()
 logging.basicConfig(level=logging.INFO)
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
 
-# Клиент только для анализа текста/лиц
+# Настройка клиента OpenRouter
 client = AsyncOpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_KEY,
@@ -27,66 +28,79 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("🚀 Бот Nano Banana 6.1 готов!\nПришлите фото для ритуальной ретуши.")
+    await message.answer("🚀 Бот Nano Banana 6.2 готов!\nОтправьте фото, и я начну ретушь.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
     status_msg = await message.answer("⌛ Шаг 1: Анализ лица...")
     
+    # 1. Получаем фото от пользователя
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
     base_64_image = base64.b64encode(photo_content.getvalue()).decode('utf-8')
     
     try:
-        # 1. Анализ через Gemini
+        # Анализ через Gemini
         response = await client.chat.completions.create(
             model="google/gemini-2.0-flash-001",
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe face, hair and clothing. Max 10 words."},
+                    {"type": "text", "text": "Describe face, hair and eyes. Max 10 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
         )
         person_desc = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"⌛ Шаг 2: Создание портрета...\n({person_desc})")
+        await status_msg.edit_text(f"⌛ Шаг 2: Генерация...\n({person_desc})")
 
-        # 2. Промпт (убираем спецсимволы, чтобы не было 400 Bad Request)
+        # 2. Формируем запрос для картинки
         clean_desc = "".join(e for e in person_desc if e.isalnum() or e.isspace())
-        prompt = f"Professional memorial studio portrait of {clean_desc} wearing formal dark suit and grey background with black mourning ribbon in corner 8k highly detailed"
+        prompt = f"Professional memorial studio portrait of {clean_desc} wearing formal dark suit and grey background with black mourning ribbon in corner 8k"
         encoded_prompt = urllib.parse.quote(prompt)
         
-        # Используем самый стабильный URL
+        # URL генератора (используем стабильный путь)
         image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true&seed={message.message_id}"
 
-        # 3. Загрузка картинки
+        # 3. Цикл скачивания с логированием размера
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=False)) as session:
-            # Даем нейросети 60 секунд на рисование (12 попыток по 5 сек)
-            for attempt in range(1, 13):
+            for attempt in range(1, 21): # До 20 попыток (около 100 секунд)
                 try:
-                    async with session.get(image_url, timeout=30) as resp:
+                    # Кэш-бастинг, чтобы не получать старый результат
+                    current_url = f"{image_url}&cb={attempt}"
+                    async with session.get(current_url, timeout=30) as resp:
                         if resp.status == 200:
                             data = await resp.read()
-                            if len(data) > 30000: # Проверка, что это не логотип
+                            file_size = len(data)
+                            
+                            # Логируем в консоль и обновляем статус в ТГ каждые 3 попытки
+                            logging.info(f"Попытка {attempt}: Размер файла {file_size} байт")
+                            
+                            if file_size > 35000: # Если больше 35 Кб — это фото, а не лого
+                                photo_file = BufferedInputFile(data, filename="result.jpg")
                                 await bot.send_photo(
                                     message.chat.id, 
-                                    photo=BufferedInputFile(data, filename="result.jpg"), 
-                                    caption="✨ Ретушь готова!"
+                                    photo=photo_file, 
+                                    caption=f"✨ Ретушь готова!\n(Размер: {file_size // 1024} Кб)"
                                 )
                                 await status_msg.delete()
                                 return
+                            else:
+                                if attempt % 2 == 0:
+                                    await status_msg.edit_text(f"⌛ Рисую... Попытка {attempt}/20\n(Текущий вес: {file_size} байт)")
+                        else:
+                            logging.warning(f"Попытка {attempt}: Код {resp.status}")
                 except Exception as e:
-                    logging.error(f"Попытка {attempt} не удалась: {e}")
+                    logging.error(f"Ошибка на попытке {attempt}: {e}")
                 
                 await asyncio.sleep(5)
 
-        await message.answer("❌ Не удалось получить изображение. Попробуйте еще раз через минуту.")
+        await message.answer("❌ Превышено время ожидания. Попробуйте отправить другое фото.")
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:50]}")
+        logging.error(f"Критическая ошибка: {e}")
+        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
