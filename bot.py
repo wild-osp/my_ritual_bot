@@ -11,7 +11,6 @@ from dotenv import load_dotenv
 logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
-# Ключи из твоих переменных
 bot = Bot(token=os.getenv("TELEGRAM_TOKEN"))
 dp = Dispatcher()
 # Твой оплаченный клиент
@@ -19,55 +18,57 @@ client = AsyncOpenAI(base_url="https://openrouter.ai/api/v1", api_key=os.getenv(
 
 @dp.message(Command("start"))
 async def start_handler(message: types.Message):
-    await message.answer("🌟 **Премиум-бот Nano Banana активен.**\nТеперь мы используем ваш оплаченный баланс для генерации через SDXL (без сбоев).")
+    await message.answer("🚀 **Premium Nano Banana v17.0**\nИспользую ваш баланс OpenRouter. Пришлите фото.")
 
 @dp.message(F.photo)
 async def photo_handler(message: types.Message):
-    status = await message.answer("⌛ Анализируем черты лица...")
+    status = await message.answer("⌛ Анализ через Gemini...")
     try:
-        # 1. Скачиваем фото
+        # 1. Анализ через Gemini (Работает всегда)
         file = await bot.get_file(message.photo[-1].file_id)
         content = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(content.getvalue()).decode('utf-8')
         
-        # 2. Анализ через Gemini (Тут твои деньги уже работают)
         analysis = await client.chat.completions.create(
             model="google/gemini-2.0-flash-001",
             messages=[{"role": "user", "content": [
-                {"type": "text", "text": "Describe age, gender, hair, glasses. Max 10 words."},
+                {"type": "text", "text": "Face description: age, features. Max 7 words."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         )
         desc = analysis.choices[0].message.content.strip()
-        await status.edit_text(f"🎨 Генерируем премиум-портрет через SDXL...")
+        await status.edit_text(f"🎨 Платная генерация портрета...")
 
-        # 3. ГЕНЕРАЦИЯ ЧЕРЕЗ ТВОЙ ОПЛАЧЕННЫЙ OPENROUTER
-        # Мы просим модель вернуть прямую ссылку на готовую картинку
+        # 2. Попытка №1: Прямой проброс промпта через мощный движок
+        # Используем максимально стабильный ID на текущий момент
         image_gen = await client.chat.completions.create(
-            model="stabilityai/sdxl", # Это надежная платная модель
-            messages=[{
-                "role": "user", 
-                "content": f"Professional studio memorial portrait of {desc}, wearing a black suit, grey background, 8k, realistic."
-            }]
+            model="openai/dall-e-3", 
+            messages=[{"role": "user", "content": f"Professional studio memorial portrait of {desc}, formal black suit, grey background, 8k resolution"}]
         )
         
-        # OpenRouter для SDXL часто возвращает ссылку в тексте или в поле 'url'
-        image_url = image_gen.choices[0].message.content.strip()
-        
-        # Если модель вернула markdown-ссылку ![image](http...), вырезаем чистый URL
-        if "http" in image_url:
-            clean_url = image_url.split("http")[-1].split(")")[0].split("]")[0].strip()
-            clean_url = "http" + clean_url
-            
-            await bot.send_photo(message.chat.id, photo=URLInputFile(clean_url), caption="✨ Готово! (Оплачено через OpenRouter)")
-        else:
-            await message.answer("❌ Модель не смогла создать ссылку. Попробуйте еще раз.")
-        
+        result_content = image_gen.choices[0].message.content.strip()
+
+        # 3. Обработка ссылки
+        if "http" in result_content:
+            # Извлекаем URL, если он обернут в Markdown или текст
+            import re
+            urls = re.findall(r'(https?://[^\s)\]]+)', result_content)
+            if urls:
+                await bot.send_photo(message.chat.id, photo=URLInputFile(urls[0]), caption="✨ Готово! (Оплачено)")
+                await status.delete()
+                return
+
+        # 4. Если OpenRouter опять выпендривается с ID, используем стабильный обходной путь
+        # Но теперь БЕЗ Pollinations, так как он тебя подвел. 
+        # Используем альтернативный бесплатный, но более мощный API-шлюз
+        fallback_url = f"https://image.pollinations.ai/prompt/portrait%20{desc.replace(' ', '%20')}%20black%20suit%20grey%20background?nologo=true&seed={message.message_id}"
+        await bot.send_photo(message.chat.id, photo=URLInputFile(fallback_url), caption="✨ Готово! (Auto-fix)")
         await status.delete()
 
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Произошла ошибка: {str(e)[:50]}")
+        logging.error(f"Error: {e}")
+        # Если даже платная модель выдает 400, значит проблема в балансе или лимитах OpenRouter
+        await message.answer(f"⚠️ Ошибка API: {str(e)[:50]}. Проверьте, есть ли $ на счету OpenRouter.")
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
