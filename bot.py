@@ -24,7 +24,7 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("🚀 VIP Бот 9.3 активен!\nМодели обновлены, каналы открыты.")
+    await message.answer("🚀 VIP Бот 9.4 (DALL-E 3) активен!\nТеперь генерация будет максимально качественной.")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
@@ -41,40 +41,43 @@ async def photo_handler(message: tg_types.Message):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe face, hair, and clothes. Max 10 words."},
+                    {"type": "text", "text": "Describe the face and hair of this person in detail. Max 12 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
         )
         description = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"🎨 Шаг 2: Генерация через Imagen 3...\n({description})")
+        await status_msg.edit_text(f"🎨 Шаг 2: Генерация через DALL-E 3...\n({description})")
 
-        # 2. Промпт
-        prompt = (f"A professional studio memorial portrait of {description}, "
-                  f"wearing a formal dark suit, solid grey background, "
-                  f"sharp focus, photorealistic, 8k resolution.")
+        # 2. Промпт для DALL-E (она любит подробности)
+        prompt = (f"A professional hyper-realistic studio memorial portrait of {description}. "
+                  f"The person is wearing a formal black suit and white shirt. "
+                  f"Background is a solid neutral grey studio backdrop. "
+                  f"In the bottom corner, a subtle black diagonal mourning ribbon. "
+                  f"8k resolution, cinematic lighting, photorealistic masterpiece.")
 
-        # 3. Запрос генерации (Используем Google Imagen 3 - она очень стабильна)
+        # 3. Запрос генерации (DALL-E 3 - золотой стандарт)
         image_response = await client.chat.completions.create(
-            model="google/imagen-3", # Сменили на супер-стабильную модель
+            model="openai/dall-e-3", 
             messages=[{"role": "user", "content": prompt}]
         )
 
         image_url = image_response.choices[0].message.content.strip()
-        logging.info(f"URL: {image_url}")
+        logging.info(f"DALL-E URL: {image_url}")
 
         if "http" in image_url:
-            # Чистим ссылку от возможных артефактов
-            url = image_url.split("http")[-1]
-            url = "http" + url.split()[0].replace(")", "").replace("]", "").replace(">", "")
-            
+            # Очистка ссылки отMarkdown-разметки, если она есть
+            url = image_url.replace("(", "").replace(")", "").replace("[", "").replace("]", "").replace(" ", "")
+            if "http" in url:
+                url = "http" + url.split("http")[-1]
+
             await bot.send_photo(
                 message.chat.id, 
                 photo=URLInputFile(url), 
-                caption=f"✨ Портрет готов!\nОписание: {description}"
+                caption=f"✨ Портрет готов!\nИспользована модель: DALL-E 3"
             )
         else:
-            await message.answer(f"⚠️ Ошибка модели: {image_url}")
+            await message.answer(f"⚠️ Ошибка DALL-E: {image_url}")
 
         await status_msg.delete()
 
