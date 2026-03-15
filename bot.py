@@ -104,18 +104,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-                            await bot.send_photo(message.chat.id, BufferedInputFile(data, "r.jpg"), caption="✨ Готово!")
-                            await status_msg.delete()
-                            return
-                await asyncio.sleep(5)
-
-    except Exception as e:
-        logging.error(f"Ошибка: {e}")
-        await message.answer(f"❌ Ошибка: {str(e)[:100]}")
-
-async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
