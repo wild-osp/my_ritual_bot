@@ -24,11 +24,11 @@ dp = Dispatcher()
 
 @dp.message(Command("start"))
 async def start_handler(message: tg_types.Message):
-    await message.answer("🚀 VIP Бот 9.4 (DALL-E 3) активен!\nТеперь генерация будет максимально качественной.")
+    await message.answer("🚀 VIP Бот 9.5 (Flux Force) активен!")
 
 @dp.message(F.photo)
 async def photo_handler(message: tg_types.Message):
-    status_msg = await message.answer("⌛ Шаг 1: Анализ лица (Gemini)...")
+    status_msg = await message.answer("⌛ Шаг 1: Анализ (Gemini)...")
     
     file = await bot.get_file(message.photo[-1].file_id)
     photo_content = await bot.download_file(file.file_path)
@@ -41,48 +41,42 @@ async def photo_handler(message: tg_types.Message):
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": "Describe the face and hair of this person in detail. Max 12 words."},
+                    {"type": "text", "text": "Describe the face and clothing. Max 10 words."},
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_64_image}"}}
                 ]
             }]
         )
         description = response.choices[0].message.content.strip()
-        await status_msg.edit_text(f"🎨 Шаг 2: Генерация через DALL-E 3...\n({description})")
+        await status_msg.edit_text(f"🎨 Шаг 2: Генерация через FLUX...\n({description})")
 
-        # 2. Промпт для DALL-E (она любит подробности)
-        prompt = (f"A professional hyper-realistic studio memorial portrait of {description}. "
-                  f"The person is wearing a formal black suit and white shirt. "
-                  f"Background is a solid neutral grey studio backdrop. "
-                  f"In the bottom corner, a subtle black diagonal mourning ribbon. "
-                  f"8k resolution, cinematic lighting, photorealistic masterpiece.")
+        # 2. Промпт
+        prompt = (f"A professional high-quality memorial studio portrait of {description}, "
+                  f"wearing a black formal suit, neutral grey background, 8k, photorealistic.")
 
-        # 3. Запрос генерации (DALL-E 3 - золотой стандарт)
-        image_response = await client.chat.completions.create(
-            model="openai/dall-e-3", 
-            messages=[{"role": "user", "content": prompt}]
-        )
-
-        image_url = image_response.choices[0].message.content.strip()
-        logging.info(f"DALL-E URL: {image_url}")
-
-        if "http" in image_url:
-            # Очистка ссылки отMarkdown-разметки, если она есть
-            url = image_url.replace("(", "").replace(")", "").replace("[", "").replace("]", "").replace(" ", "")
-            if "http" in url:
-                url = "http" + url.split("http")[-1]
-
-            await bot.send_photo(
-                message.chat.id, 
-                photo=URLInputFile(url), 
-                caption=f"✨ Портрет готов!\nИспользована модель: DALL-E 3"
+        # 3. Запрос генерации (FLUX - самая актуальная модель на OpenRouter)
+        try:
+            image_response = await client.chat.completions.create(
+                model="black-forest-labs/flux-schnell", 
+                messages=[{"role": "user", "content": prompt}]
             )
-        else:
-            await message.answer(f"⚠️ Ошибка DALL-E: {image_url}")
+            image_url = image_response.choices[0].message.content.strip()
+            
+            logging.info(f"FLUX URL Result: {image_url}")
+
+            if "http" in image_url:
+                url = image_url.replace("(", "").replace(")", "").replace("[", "").replace("]", "").strip()
+                await bot.send_photo(message.chat.id, photo=URLInputFile(url), caption="✨ Ретушь готова!")
+            else:
+                await message.answer(f"⚠️ Ответ сервера не содержит ссылки: {image_url}")
+
+        except Exception as api_err:
+            logging.error(f"Ошибка именно на этапе генерации: {api_err}")
+            await message.answer(f"❌ Ошибка API: {str(api_err)[:100]}")
 
         await status_msg.delete()
 
     except Exception as e:
-        logging.error(f"Ошибка: {e}")
+        logging.error(f"Общая ошибка: {e}")
         await message.answer(f"❌ Ошибка: {str(e)[:100]}")
 
 async def main():
