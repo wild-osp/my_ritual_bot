@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import aiohttp
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -27,8 +28,9 @@ state = AppState()
 async def on_startup():
     state.session = aiohttp.ClientSession(
         headers={
-            "Authorization": f"Bearer {API_KEY}",
-            "Content-Type": "application/json"
+            "Authorization": f"Bearer {API_KEY.strip()}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://github.com/my_bot",
         }
     )
 
@@ -38,76 +40,80 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Отправьте фото. Теперь используем FLUX через корректный эндпоинт.")
+    await message.answer("📸 Бот готов. Пришлите фото. Использую FLUX Schnell (самая быстрая и стабильная модель).")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Анализ...")
+    status = await message.answer("⏳ Работаю...")
     
     try:
-        # 1. Скачиваем фото
+        # 1. Фото
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # 2. Описание лица (Claude 3.5 Sonnet)
-        await status.edit_text("🔍 Описываю внешность...")
+        # 2. Анализ
+        await status.edit_text("🔍 Анализ внешности...")
         analysis_body = {
-            "model": "anthropic/claude-3.5-sonnet",
+            "model": "google/gemini-2.0-flash-001", # Заменил на Gemini, она дешевле и быстрее для анализа
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe the person's face and hair very concisely (10 words)."},
+                {"type": "text", "text": "Describe the person's face, hair, and age. Max 10 words."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
         async with state.session.post("https://openrouter.ai/api/v1/chat/completions", json=analysis_body) as resp:
             data = await resp.json()
+            if 'choices' not in data:
+                raise Exception(f"Gemini Error: {data}")
             description = data['choices'][0]['message']['content']
 
-        # 3. Генерация через FLUX (ВАЖНО: через chat/completions)
-        await status.edit_text("🎨 Генерирую портрет...")
+        # 3. Генерация (FLUX Schnell - самая стабильная версия на OpenRouter)
+        await status.edit_text("🎨 Генерирую портрет (FLUX)...")
         
         flux_body = {
-            "model": "black-forest-labs/flux-1-dev",
+            "model": "black-forest-labs/flux-1-schnell", # Эта модель ID точно работает
             "messages": [{
                 "role": "user", 
-                "content": f"Generate a professional photorealistic studio portrait of {description}, wearing a black suit, grey background. High resolution."
+                "content": f"A professional photorealistic studio portrait of {description}, wearing a black formal suit, solid neutral grey background, high detail, 8k."
             }]
         }
 
         async with state.session.post("https://openrouter.ai/api/v1/chat/completions", json=flux_body) as resp:
-            # FLUX на OpenRouter возвращает JSON со ссылкой на изображение в тексте или в вложениях
             gen_data = await resp.json()
+            logger.info(f"OpenRouter Response: {gen_data}") # Логируем для отладки
             
             if "choices" not in gen_data:
-                raise Exception(f"Ошибка OpenRouter: {gen_data}")
+                error_msg = gen_data.get('error', {}).get('message', 'Unknown Error')
+                raise Exception(f"Генерация не удалась: {error_msg}")
             
-            # Извлекаем URL картинки (он обычно в контенте или в поле 'url')
-            # В случае FLUX OpenRouter часто отдает URL
             content = gen_data['choices'][0]['message']['content']
             
-            # Если API вернул URL (что чаще всего для FLUX), скачиваем его
-            import re
+            # Поиск URL в ответе
             urls = re.findall(r'(https?://\S+)', content)
             if not urls:
-                raise Exception("Не удалось найти ссылку на изображение в ответе AI")
+                # Иногда ссылка приходит без протокола или в специальном поле
+                raise Exception("AI не вернул ссылку на изображение. Попробуйте еще раз.")
             
-            image_url = urls[0].replace(')', '').replace(']', '') # Очистка от Markdown
+            image_url = urls[0].split(')')[0].split(']')[0].strip()
 
-        # 4. Загрузка готовой картинки и отправка
+        # 4. Скачивание и отправка
         async with state.session.get(image_url) as img_resp:
+            if img_resp.status != 200:
+                raise Exception("Не удалось скачать готовое изображение по ссылке.")
             final_image_bytes = await img_resp.read()
 
         await bot.send_photo(
             message.chat.id,
             BufferedInputFile(final_image_bytes, filename="result.jpg"),
-            caption=f"✅ Готово\nОписание: {description}"
+            caption=f"✅ Готово!\n\n_{description}_",
+            parse_mode="Markdown"
         )
         await status.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await status.edit_text(f"❌ Ошибка API: {str(e)[:100]}")
+        logger.error(f"Глобальная ошибка: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)}")
 
 async def main():
     dp.startup.register(on_startup)
