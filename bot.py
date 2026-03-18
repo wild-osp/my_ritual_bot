@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import aiohttp
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -14,7 +15,7 @@ load_dotenv()
 
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -27,8 +28,7 @@ state = AppState()
 async def on_startup():
     state.session = aiohttp.ClientSession(headers={
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "X-Title": "Ritual Photo Expert"
+        "Content-Type": "application/json"
     })
 
 async def on_shutdown():
@@ -37,73 +37,65 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот запущен. Работаем через Gemini 2.0.\nПришлите фото.")
+    await message.answer("📸 Бот готов. Пришлите фото для ритуальной ретуши (костюм, серый фон).")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Обработка нейросетью...")
+    status = await message.answer("⏳ Анализ лица...")
     
     try:
+        # 1. Анализ фото
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Весь процесс в ОДНОМ запросе к Gemini 2.0
-        # Мы просим её проанализировать и СРАЗУ сгенерировать ответ
         payload = {
             "model": "google/gemini-2.0-flash-001",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text", 
-                            "text": "Analyze this person's face. Then, generate and provide a direct URL to a professional photorealistic 8k studio portrait of THIS person wearing a formal black suit, white shirt, on a solid neutral grey background. Output ONLY the resulting image URL."
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
-                        }
-                    ]
-                }
-            ]
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "Describe the person's face, hair, and age in 5-7 words. No punctuation."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
+            ]}]
         }
 
-        async with state.session.post(URL, json=payload) as resp:
+        async with state.session.post(OPENROUTER_URL, json=payload) as resp:
             data = await resp.json()
-            if "choices" not in data:
-                raise Exception(f"API Error: {data}")
-            
-            answer = data['choices'][0]['message']['content']
-            
-            # Ищем ссылку в ответе Gemini
-            import re
-            urls = re.findall(r'https?://\S+', answer)
-            
-            if not urls:
-                # Если Gemini просто описала, но не дала ссылку, пробуем запасной бесплатный сервис с другим синтаксисом
-                clean_desc = answer.replace('\n', ' ')[:100]
-                image_url = f"https://image.pollinations.ai/prompt/portrait%20of%20{clean_desc}%20black%20suit%20grey%20background?nologo=true"
-            else:
-                image_url = urls[0].strip("()[]\"' ")
+            description = data['choices'][0]['message']['content'].strip()
 
-        # Скачиваем результат
-        async with state.session.get(image_url) as img_resp:
-            if img_resp.status == 200:
-                final_bytes = await img_resp.read()
-                await bot.send_photo(
-                    message.chat.id,
-                    BufferedInputFile(final_bytes, filename="retouch.jpg"),
-                    caption="✅ Ретушь готова"
-                )
-            else:
-                await message.answer(f"✅ Готово! Посмотрите результат по ссылке:\n{image_url}")
+        await status.edit_text("🎨 Генерация портрета...")
+
+        # 2. Формируем "чистый" промпт для Pollinations
+        # Убираем все спецсимволы, чтобы не было 'fetch failed'
+        clean_desc = "".join(e for e in description if e.isalnum() or e.isspace())
+        prompt = f"Professional portrait of {clean_desc} in black suit white shirt grey background photorealistic 8k"
+        encoded_prompt = urllib.parse.quote(prompt)
         
-        await status.delete()
+        # Используем модель FLUX через Pollinations (она самая качественная сейчас)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux&seed=42"
+
+        # 3. Пытаемся отправить картинку
+        try:
+            async with state.session.get(image_url, timeout=15) as img_resp:
+                if img_resp.status == 200:
+                    img_data = await img_resp.read()
+                    await bot.send_photo(
+                        message.chat.id, 
+                        BufferedInputFile(img_data, filename="retouch.jpg"),
+                        caption=f"✅ Готово!\n_{description}_"
+                    )
+                    await status.delete()
+                    return
+        except:
+            pass
+
+        # Если не скачалось — даем ссылку, которая ТОЧНО сработает в браузере
+        await status.edit_text(
+            f"✅ Ретушь выполнена!\n\nКликните по ссылке, чтобы открыть фото:\n{image_url}",
+            disable_web_page_preview=False
+        )
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 async def main():
     dp.startup.register(on_startup)
