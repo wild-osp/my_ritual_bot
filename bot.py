@@ -3,11 +3,9 @@ import asyncio
 import base64
 import logging
 import aiohttp
-import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
-from aiogram.utils.markdown import hlink
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
@@ -29,7 +27,8 @@ state = AppState()
 async def on_startup():
     state.session = aiohttp.ClientSession(headers={
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "X-Title": "Ritual Photo Expert"
     })
 
 async def on_shutdown():
@@ -38,64 +37,73 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот готов. Отправьте фото (ретушь в костюм).")
+    await message.answer("📸 Бот запущен. Работаем через Gemini 2.0.\nПришлите фото.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ 1/2 Анализ...")
+    status = await message.answer("⏳ Обработка нейросетью...")
     
     try:
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Анализ через OpenRouter (этот этап у тебя работает)
+        # Весь процесс в ОДНОМ запросе к Gemini 2.0
+        # Мы просим её проанализировать и СРАЗУ сгенерировать ответ
         payload = {
             "model": "google/gemini-2.0-flash-001",
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe face and age in 10 words."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
-            ]}]
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": "Analyze this person's face. Then, generate and provide a direct URL to a professional photorealistic 8k studio portrait of THIS person wearing a formal black suit, white shirt, on a solid neutral grey background. Output ONLY the resulting image URL."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
+                        }
+                    ]
+                }
+            ]
         }
 
         async with state.session.post(URL, json=payload) as resp:
             data = await resp.json()
-            description = data['choices'][0]['message']['content']
+            if "choices" not in data:
+                raise Exception(f"API Error: {data}")
+            
+            answer = data['choices'][0]['message']['content']
+            
+            # Ищем ссылку в ответе Gemini
+            import re
+            urls = re.findall(r'https?://\S+', answer)
+            
+            if not urls:
+                # Если Gemini просто описала, но не дала ссылку, пробуем запасной бесплатный сервис с другим синтаксисом
+                clean_desc = answer.replace('\n', ' ')[:100]
+                image_url = f"https://image.pollinations.ai/prompt/portrait%20of%20{clean_desc}%20black%20suit%20grey%20background?nologo=true"
+            else:
+                image_url = urls[0].strip("()[]\"' ")
 
-        await status.edit_text("🎨 2/2 Генерация...")
-
-        # Формируем промпт (сделал короче для надежности)
-        prompt = f"Portrait of {description}, formal black suit, grey background, 8k, realistic"
-        encoded_prompt = urllib.parse.quote(prompt)
+        # Скачиваем результат
+        async with state.session.get(image_url) as img_resp:
+            if img_resp.status == 200:
+                final_bytes = await img_resp.read()
+                await bot.send_photo(
+                    message.chat.id,
+                    BufferedInputFile(final_bytes, filename="retouch.jpg"),
+                    caption="✅ Ретушь готова"
+                )
+            else:
+                await message.answer(f"✅ Готово! Посмотрите результат по ссылке:\n{image_url}")
         
-        # Ссылка на генерацию
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed=123"
-
-        # Попытка скачать изображение
-        try:
-            async with state.session.get(image_url, timeout=20) as img_resp:
-                if img_resp.status == 200:
-                    final_bytes = await img_resp.read()
-                    await bot.send_photo(
-                        message.chat.id,
-                        BufferedInputFile(final_bytes, filename="res.jpg"),
-                        caption=f"✅ Готово!\n_{description}_"
-                    )
-                    await status.delete()
-                    return
-                else:
-                    raise Exception("Server busy")
-        except Exception as e:
-            # ЕСЛИ СКАЧАТЬ НЕ ВЫШЛО — ПРОСТО ДАЕМ ССЫЛКУ
-            logger.warning(f"Download failed, giving link: {e}")
-            await status.edit_text(
-                f"✅ Портрет готов!\n\nК сожалению, не удалось загрузить файл напрямую, но вы можете открыть его по ссылке:\n\n🔗 [СМОТРЕТЬ ПОРТРЕТ]({image_url})",
-                parse_mode="Markdown"
-            )
+        await status.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        logger.error(f"Error: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
 
 async def main():
     dp.startup.register(on_startup)
