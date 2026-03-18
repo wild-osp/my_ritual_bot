@@ -3,10 +3,10 @@ import asyncio
 import base64
 import logging
 import aiohttp
+import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
-from aiogram.client.session.aiohttp import AiohttpSession
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
@@ -14,13 +14,12 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-API_KEY = os.getenv("OPENROUTER_KEY")
+# Конфиг
+API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-PROXY_URL = os.getenv("PROXY_URL") # Например: http://user:pass@ip:port
+BASE_URL = "https://openrouter.ai/api/v1/chat/completions"
 
-# Настройка сессии для Telegram (с прокси, если есть)
-session = AiohttpSession(proxy=PROXY_URL) if PROXY_URL else None
-bot = Bot(token=BOT_TOKEN, session=session)
+bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 class AppState:
@@ -29,13 +28,11 @@ class AppState:
 state = AppState()
 
 async def on_startup():
-    # Для OpenRouter прокси обычно не нужен, но если сервер в РФ - может понадобиться
-    state.session = aiohttp.ClientSession(
-        headers={
-            "Authorization": f"Bearer {API_KEY.strip()}",
-            "Content-Type": "application/json",
-        }
-    )
+    state.session = aiohttp.ClientSession(headers={
+        "Authorization": f"Bearer {API_KEY}",
+        "Content-Type": "application/json",
+        "X-Title": "Ritual Photo Bot"
+    })
 
 async def on_shutdown():
     if state.session:
@@ -43,59 +40,73 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот запущен. Пришлите фото.")
+    await message.answer("🤖 Бот готов. Пришлите фото, я сделаю ретушь через SDXL.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Анализирую...")
+    status = await message.answer("⏳ Шаг 1: Анализ лица...")
     
     try:
+        # Получаем фото
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # 1. АНАЛИЗ (Gemini)
-        analysis_body = {
+        # 1. Анализ (Gemini - самая дешевая и быстрая для зрения)
+        analysis_payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe person face and hair concisely (10 words)."},
+                {"type": "text", "text": "Describe the person's face features, hair and age very briefly (max 10 words)."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
-        async with state.session.post("https://openrouter.ai/api/v1/chat/completions", json=analysis_body) as resp:
-            data = await resp.json()
-            description = data['choices'][0]['message']['content']
+        async with state.session.post(BASE_URL, json=analysis_payload) as resp:
+            res_data = await resp.json()
+            if "choices" not in res_data:
+                raise Exception(f"Ошибка анализа: {res_data}")
+            description = res_data['choices'][0]['message']['content']
 
-        await status.edit_text(f"🎨 Генерирую образ: {description}...")
+        await status.edit_text(f"⏳ Шаг 2: Генерация портрета...")
 
-        # 2. ГЕНЕРАЦИЯ (Используем SDXL - самый стабильный ID)
-        gen_body = {
+        # 2. Генерация (SDXL через чат-интерфейс)
+        gen_payload = {
             "model": "stabilityai/stable-diffusion-xl",
-            "prompt": f"Professional photorealistic studio portrait of {description}, wearing a black formal suit, grey background, sharp focus, 8k",
-            "response_format": "b64_json"
+            "messages": [{"role": "user", "content": f"Generate a professional photo portrait of {description}, wearing a black suit, solid grey background, photorealistic, 8k"}]
         }
 
-        # ВАЖНО: SDXL часто требует эндпоинт /images/generations
-        async with state.session.post("https://openrouter.ai/api/v1/images/generations", json=gen_body) as resp:
+        async with state.session.post(BASE_URL, json=gen_payload) as resp:
             gen_data = await resp.json()
+            logger.info(f"Full Gen Response: {gen_data}")
             
-            if "data" not in gen_data:
-                # Если не сработало, пробуем через чат-эндпоинт как запасной вариант
-                raise Exception(f"API Error: {gen_data.get('error', {}).get('message', 'No data')}")
+            if "choices" not in gen_data:
+                err = gen_data.get('error', {}).get('message', 'Неизвестная ошибка')
+                raise Exception(f"Ошибка OpenRouter: {err}")
+
+            # Ищем URL в ответе (OpenRouter возвращает его в поле content)
+            content = gen_data['choices'][0]['message']['content']
+            urls = re.findall(r'https?://\S+', content)
             
-            image_raw = base64.b64decode(gen_data['data'][0]['b64_json'])
+            if not urls:
+                raise Exception("AI не выдал ссылку на картинку. Возможно, недостаточно средств.")
+            
+            final_url = urls[0].strip("()[]\"' ")
+
+        # 3. Скачивание результата
+        async with state.session.get(final_url) as img_resp:
+            image_bytes = await img_resp.read()
 
         await bot.send_photo(
             message.chat.id,
-            BufferedInputFile(image_raw, filename="res.jpg"),
-            caption=f"✅ Готово\n{description}"
+            BufferedInputFile(image_bytes, filename="result.jpg"),
+            caption=f"✅ Готово!\n_{description}_",
+            parse_mode="Markdown"
         )
         await status.delete()
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)}")
+        logger.error(f"Error: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:200]}")
 
 async def main():
     dp.startup.register(on_startup)
