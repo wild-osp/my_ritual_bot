@@ -15,7 +15,6 @@ load_dotenv()
 
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-URL = "https://openrouter.ai/api/v1/chat/completions"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -26,14 +25,20 @@ class AppState:
 state = AppState()
 
 async def on_startup():
-    # ВАЖНО: Добавляем обязательные заголовки OpenRouter
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/your_bot_link", # Замени на ссылку на своего бота
-        "X-Title": "Ritual Retouch Bot v2"
+        "HTTP-Referer": "https://github.com/aiogram/aiogram", # Обязательно для некоторых моделей
+        "X-Title": "Diagnostic Ritual Bot"
     }
     state.session = aiohttp.ClientSession(headers=headers)
+    
+    # ПРОВЕРКА БАЛАНСА ПРИ СТАРТЕ
+    async with state.session.get("https://openrouter.ai/api/v1/auth/key") as resp:
+        key_data = await resp.json()
+        logger.info(f"--- DIAGNOSTIC DATA ---")
+        logger.info(f"Key Info: {key_data}")
+        # Если здесь баланс 0 или ошибка - ключ настроен неверно
 
 async def on_shutdown():
     if state.session:
@@ -41,77 +46,75 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Баланс обнаружен! Использую премиум-модель FLUX для вашего фото.")
+    # Узнаем баланс для пользователя
+    async with state.session.get("https://openrouter.ai/api/v1/auth/key") as resp:
+        data = await resp.json()
+        limit = data.get('limit', 'N/A')
+        usage = data.get('usage', 'N/A')
+        # В OpenRouter баланс = limit - usage
+        await message.answer(f"🛠 Диагностика:\nКлюч активен: {not data.get('is_expired', True)}\nЛимит: {limit}$\nИспользовано: {usage}$")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Шаг 1: Глубокий анализ лица...")
+    status = await message.answer("⏳ Анализ и проверка лимитов...")
     
     try:
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Используем Gemini 2.0 Flash для анализа (самая стабильная)
+        # 1. Анализ (Gemini)
         analysis_payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Precisely describe the person's face, hair, and age. Output only description, max 15 words."},
+                {"type": "text", "text": "Short face description (10 words)."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
-        async with state.session.post(URL, json=analysis_payload) as resp:
+        async with state.session.post("https://openrouter.ai/api/v1/chat/completions", json=analysis_payload) as resp:
             data = await resp.json()
             if "choices" not in data:
-                raise Exception(f"OpenRouter Auth Error: {data.get('error', {}).get('message')}")
+                raise Exception(f"Ошибка доступа: {data}")
             description = data['choices'][0]['message']['content']
 
-        await status.edit_text("🎨 Шаг 2: Генерация через FLUX (Premium)...")
+        await status.edit_text(f"🔍 Описание: {description}\n🎨 Пробую генерацию...")
 
-        # ГЕНЕРАЦИЯ: Если есть $5, FLUX Schnell - лучший выбор по цене/качеству
-        gen_payload = {
-            "model": "black-forest-labs/flux-1-schnell",
-            "messages": [{"role": "user", "content": f"A professional high-quality photorealistic studio portrait of {description}, wearing a black formal suit, solid grey background, sharp focus, 8k resolution, highly detailed skin."}]
-        }
-
-        async with state.session.post(URL, json=gen_payload) as resp:
-            gen_data = await resp.json()
-            logger.info(f"FLUX Response: {gen_data}")
+        # 2. ГЕНЕРАЦИЯ С ПОЛНЫМ ЛОГОМ
+        # Пробуем по очереди разные форматы ID
+        test_models = ["black-forest-labs/flux-1-schnell", "stabilityai/stable-diffusion-xl", "openai/dall-e-3"]
+        
+        final_url = None
+        for model in test_models:
+            logger.info(f"Trying model ID: {model}")
+            gen_payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": f"Studio portrait of {description}, black suit, grey background"}]
+            }
             
-            if "choices" not in gen_data:
-                # Если 5 долларов не помогли, значит проблема в ID модели. Пробуем резервный SDXL
-                logger.warning("FLUX failed, trying SDXL...")
-                gen_payload["model"] = "stabilityai/stable-diffusion-xl"
-                async with state.session.post(URL, json=gen_payload) as resp_retry:
-                    gen_data = await resp_retry.json()
+            async with state.session.post("https://openrouter.ai/api/v1/chat/completions", json=gen_payload) as resp:
+                raw_response = await resp.json()
+                logger.info(f"Response for {model}: {raw_response}")
+                
+                if "choices" in raw_response:
+                    content = raw_response['choices'][0]['message']['content']
+                    urls = re.findall(r'https?://\S+', content)
+                    if urls:
+                        final_url = urls[0].strip("()[]\"' ")
+                        break
+        
+        if not final_url:
+            raise Exception("Ни одна модель не приняла запрос. Проверь логи консоли!")
 
-            if "choices" not in gen_data:
-                raise Exception(f"Ошибка баланса/модели: {gen_data.get('error', {}).get('message')}")
+        async with state.session.get(final_url) as img_resp:
+            image_data = await img_resp.read()
 
-            content = gen_data['choices'][0]['message']['content']
-            urls = re.findall(r'https?://\S+', content)
-            
-            if not urls:
-                raise Exception("AI не вернул прямую ссылку на изображение.")
-            
-            img_url = urls[0].strip("()[]\"' ")
-
-        # Скачивание и отправка
-        async with state.session.get(img_url) as img_resp:
-            final_bytes = await img_resp.read()
-
-        await bot.send_photo(
-            message.chat.id,
-            BufferedInputFile(final_bytes, filename="res.jpg"),
-            caption=f"✅ Готово!\n\n_{description}_",
-            parse_mode="Markdown"
-        )
+        await bot.send_photo(message.chat.id, BufferedInputFile(image_data, filename="res.jpg"))
         await status.delete()
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+        logger.error(f"FATAL ERROR: {e}")
+        await status.edit_text(f"❌ Ошибка:\n{str(e)}")
 
 async def main():
     dp.startup.register(on_startup)
