@@ -3,7 +3,7 @@ import asyncio
 import base64
 import logging
 import aiohttp
-import re
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -15,7 +15,7 @@ load_dotenv()
 
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# ТОЛЬКО ЭТОТ URL РАБОТАЕТ НА OPENROUTER
+# Используем только тот эндпоинт, который у тебя работает
 URL = "https://openrouter.ai/api/v1/chat/completions"
 
 bot = Bot(token=BOT_TOKEN)
@@ -30,8 +30,7 @@ async def on_startup():
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/ritual_bot",
-        "X-Title": "Ritual AI Retouch"
+        "X-Title": "Ritual Portrait Bot"
     }
     state.session = aiohttp.ClientSession(headers=headers)
 
@@ -41,80 +40,61 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот готов. Баланс подтвержден. Пришлите фото.")
+    await message.answer("📸 Бот готов. Пришлите фото, и я сделаю ретушь (костюм, серый фон).")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Анализ лица...")
+    status = await message.answer("⏳ Шаг 1: Анализ лица через OpenRouter...")
     
     try:
+        # 1. Получаем фото и кодируем в Base64
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # 1. Анализ (Gemini) - это у нас уже работало
+        # 2. Анализ (Gemini 2.0 Flash - работает на твоем ключе 100%)
         analysis_payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe the person's face and hair in 10 words for a portrait."},
+                {"type": "text", "text": "Describe the person's face, hair, gender and age very accurately in 15 words."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
         async with state.session.post(URL, json=analysis_payload) as resp:
             data = await resp.json()
+            if "choices" not in data:
+                raise Exception(f"OpenRouter Error: {data.get('error', {}).get('message')}")
             description = data['choices'][0]['message']['content']
 
-        await status.edit_text(f"🎨 Генерирую через FLUX...")
+        await status.edit_text("🎨 Шаг 2: Генерация финальной ссылки...")
 
-        # 2. ГЕНЕРАЦИЯ (Через Chat Completions, но спец-формат)
-        # ВНИМАНИЕ: Используем 'black-forest-labs/flux-1-schnell' как проверенный ID
-        gen_payload = {
-            "model": "black-forest-labs/flux-1-schnell",
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": f"Generate a high-quality professional photorealistic studio portrait of {description}, wearing a black suit, solid grey background, sharp focus, 8k resolution."
-                }
-            ],
-            "extra_body": {
-                "response_format": {"type": "json_object"}
-            }
-        }
+        # 3. Формируем прямую ссылку на генерацию (Pollinations AI - использует FLUX/SDXL бесплатно)
+        # Это спасет нас от ошибок 400/404, так как запрос идет в обход ограничений OpenRouter
+        full_prompt = f"Professional photorealistic studio portrait of {description}, wearing a black formal suit, white shirt, solid neutral grey background, high detail, 8k, sharp focus, masterpiece."
+        encoded_prompt = urllib.parse.quote(full_prompt)
+        
+        # Генерируем URL (модель flux включена по умолчанию)
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed=42&model=flux"
 
-        async with state.session.post(URL, json=gen_payload) as resp:
-            gen_data = await resp.json()
-            logger.info(f"FLUX Chat Response: {gen_data}")
-            
-            if "choices" not in gen_data:
-                err = gen_data.get('error', {}).get('message', 'Unknown')
-                raise Exception(f"OpenRouter Error: {err}")
-
-            # OpenRouter для FLUX в чате возвращает ссылку прямо в тексте сообщения
-            content = gen_data['choices'][0]['message']['content']
-            urls = re.findall(r'https?://\S+', content)
-            
-            if not urls:
-                # Если ссылка не в тексте, проверяем поле 'url' в вложениях (редко, но бывает)
-                raise Exception(f"AI не прислал ссылку. Ответ: {content[:100]}")
-            
-            image_url = urls[0].strip("()[]\"' ")
-
-        # 3. Скачивание
+        # 4. Скачиваем изображение по ссылке (чтобы прислать файл, а не просто текст)
         async with state.session.get(image_url) as img_resp:
-            final_bytes = await img_resp.read()
+            if img_resp.status != 200:
+                raise Exception("Не удалось получить изображение с сервера генерации.")
+            final_image_bytes = await img_resp.read()
 
+        # 5. Отправка результата пользователю
         await bot.send_photo(
             message.chat.id,
-            BufferedInputFile(final_bytes, filename="res.jpg"),
-            caption=f"✅ Готово!\n_{description}_",
+            BufferedInputFile(final_image_bytes, filename="ritual_portrait.jpg"),
+            caption=f"✅ Готово!\n\n🔗 [Прямая ссылка на фото]({image_url})\n\n_Описание: {description}_",
             parse_mode="Markdown"
         )
         await status.delete()
 
     except Exception as e:
         logger.error(f"Ошибка: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)}")
+        await status.edit_text(f"❌ Произошла ошибка: {str(e)[:200]}")
 
 async def main():
     dp.startup.register(on_startup)
