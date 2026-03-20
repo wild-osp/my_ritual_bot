@@ -3,17 +3,15 @@ import asyncio
 import base64
 import logging
 import aiohttp
-import urllib.parse
-import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
+# Твои ключи из .env
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 URL = "https://openrouter.ai/api/v1/chat/completions"
@@ -27,11 +25,14 @@ class AppState:
 state = AppState()
 
 async def on_startup():
-    state.session = aiohttp.ClientSession(headers={
+    # Настраиваем сессию с заголовками для платного аккаунта
+    headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/ritual_bot"
-    })
+        "HTTP-Referer": "https://t.me/my_retouch_task_bot",
+        "X-Title": "Ritual Debug Bot"
+    }
+    state.session = aiohttp.ClientSession(headers=headers)
 
 async def on_shutdown():
     if state.session:
@@ -39,57 +40,51 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("🚀 Режим повышенной стабильности включен. Пришлите фото.")
+    await message.answer("🧪 Режим отладки: присылай фото, а я попробую его описать через Gemini 2.0.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Шаг 1: Анализ лица (Gemini)...")
+    status = await message.answer("⏳ Связываюсь с OpenRouter (Gemini 2.0)...")
     
     try:
+        # 1. Подготовка фото
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
-        base_4_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
+        base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Анализ (тратим баланс на Gemini)
+        # 2. Запрос к текстовой модели
         payload = {
             "model": "google/gemini-2.0-flash-001",
-            "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe age and face features in 5 words. No punctuation."},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base_4_img}"}}
-            ]}]
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text", 
+                            "text": "Analyze this person. Create a detailed 50-word prompt for an AI image generator to place this exact person in a black formal suit on a grey background. Be very specific about facial features."
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
+                        }
+                    ]
+                }
+            ]
         }
 
         async with state.session.post(URL, json=payload) as resp:
             data = await resp.json()
-            description = data['choices'][0]['message']['content'].strip()
-            # Убираем всё, кроме букв и цифр для URL
-            clean_desc = re.sub(r'[^a-zA-Z0-9 ]', '', description)
-
-        await status.edit_text("🎨 Шаг 2: Генерация через FLUX...")
-
-        # ВАЖНО: Используем модель FLUX, а не SANA
-        image_url = f"https://image.pollinations.ai/prompt/portrait%20of%20{urllib.parse.quote(clean_desc)}%20in%20black%20suit%20grey%20background%208k%20highly%20detailed?model=flux&width=1024&height=1024&nologo=true&seed={os.urandom(2).hex()}"
-
-        # Скачиваем результат
-        async with state.session.get(image_url, timeout=45) as img_resp:
-            if img_resp.status == 200:
-                content = await img_resp.read()
-                # Если вместо картинки пришел JSON с ошибкой - ловим это
-                if b"error" in content[:100]:
-                    raise Exception("Сервер прислал ошибку вместо фото")
-                
-                await bot.send_photo(
-                    message.chat.id,
-                    BufferedInputFile(content, filename="ritual.jpg"),
-                    caption=f"✅ Готово!\n_{description}_"
-                )
-                await status.delete()
+            
+            if "choices" in data:
+                ai_text = data['choices'][0]['message']['content']
+                await status.edit_text(f"✅ **Связь установлена!**\n\n**Gemini составила такой промпт:**\n\n{ai_text}", parse_mode="Markdown")
             else:
-                await status.edit_text(f"⚠️ Сервер временно перегружен. Попробуйте по прямой ссылке через минуту:\n\n{image_url}")
+                error_msg = data.get('error', {}).get('message', 'Неизвестная ошибка')
+                await status.edit_text(f"❌ Ошибка OpenRouter: {error_msg}")
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        logger.error(f"Ошибка: {e}")
+        await status.edit_text(f"❌ Системная ошибка: {str(e)}")
 
 async def main():
     dp.startup.register(on_startup)
