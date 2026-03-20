@@ -8,12 +8,12 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
-# Настройка логирования для отслеживания процесса
+# Настройка логирования
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-# Ключи из вашего .env файла
+# Ключи
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY").strip()
 STABILITY_KEY = os.getenv("STABILITY_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN").strip()
@@ -39,6 +39,9 @@ async def get_face_description(session, image_base64):
     }
     async with session.post(url, headers=headers, json=payload) as resp:
         result = await resp.json()
+        if 'choices' not in result:
+            logger.error(f"OpenRouter Error: {result}")
+            return "elderly person"
         return result['choices'][0]['message']['content'].strip()
 
 async def generate_with_img2img(session, original_bytes, description):
@@ -49,17 +52,16 @@ async def generate_with_img2img(session, original_bytes, description):
         "Accept": "application/json"
     }
     
-    # Подготовка данных для SDXL
     data = aiohttp.FormData()
     data.add_field('text_prompts[0][text]', f"Professional studio portrait of this specific person, wearing a black formal suit, white shirt, solid neutral grey background, 8k resolution, photorealistic, sharp focus")
     data.add_field('text_prompts[0][weight]', '1.0')
     data.add_field('init_image', original_bytes, filename='init.png', content_type='image/png')
     data.add_field('init_image_mode', 'IMAGE_STRENGTH')
     
-    # Сила сохранения оригинала (0.42 — оптимально для узнаваемости)
-    data.add_field('image_strength', '0.42') 
+    # Сила сохранения оригинала (0.45 — для максимального сходства)
+    data.add_field('image_strength', '0.45') 
     
-    # ИСПРАВЛЕНИЕ ОШИБКИ ГАБАРИТОВ: принудительно 1024x1024
+    # Принудительные размеры для SDXL
     data.add_field('width', '1024')
     data.add_field('height', '1024')
     
@@ -79,50 +81,51 @@ async def generate_with_img2img(session, original_bytes, description):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    await message.answer("📸 Бот готов к ритуальной ретуши! Пришлите фото, и я сделаю портрет в костюме, сохранив черты лица.")
+    await message.answer("📸 Бот готов! Пришлите фото, и я сделаю портрет в костюме с сохранением черт лица.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ 1/2 Анализирую лицо через Gemini...")
+    status = await message.answer("⏳ 1/2 Анализирую лицо...")
     
     async with aiohttp.ClientSession() as session:
         try:
-            # Скачивание фото из Telegram
-            file = await bot.get_file(message.photo[-1].file_id)
-            photo_bytes = await bot.download_file(file.path)
+            # ИСПРАВЛЕНИЕ: используем file_id и скачиваем корректно
+            file_id = message.photo[-1].file_id
+            file = await bot.get_file(file_id)
+            
+            # ИСПРАВЛЕНИЕ: здесь был атрибут .path, теперь .file_path
+            photo_bytes = await bot.download_file(file.file_path)
             photo_data = photo_bytes.getvalue()
             
-            # Подготовка для анализа
             img_b64 = base64.b64encode(photo_data).decode('utf-8')
             desc = await get_face_description(session, img_b64)
             
-            await status.edit_text(f"🎨 2/2 Создаю портрет (SDXL Img2Img)...")
+            await status.edit_text(f"🎨 2/2 Сохраняю сходство и меняю костюм...")
             
-            # Генерация нового изображения на основе оригинала
             final_image = await generate_with_img2img(session, photo_data, desc)
             
             if final_image:
                 await bot.send_photo(
                     message.chat.id,
                     BufferedInputFile(final_image, filename="result.png"),
-                    caption=f"✅ Ретушь готова.\nИспользовано описание: {desc}"
+                    caption=f"✅ Готово.\nОписание: {desc}"
                 )
                 await status.delete()
             else:
-                await status.edit_text("❌ Ошибка Stability AI. Проверьте кредиты или параметры.")
+                await status.edit_text("❌ Ошибка генерации. Проверьте кредиты на Stability AI.")
                 
         except Exception as e:
             logger.error(f"Ошибка обработчика: {e}")
-            await status.edit_text(f"❌ Произошла ошибка: {str(e)[:100]}")
+            await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 @dp.message()
 async def any_msg(message: types.Message):
-    await message.answer("Чтобы начать, просто пришлите мне ФОТОГРАФИЮ человека.")
+    await message.answer("Просто пришлите мне ФОТОГРАФИЮ человека.")
 
 # --- ЗАПУСК ---
 
 async def main():
-    logger.info("Бот запущен и ожидает сообщений...")
+    logger.info("Бот запущен...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
