@@ -8,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
 from dotenv import load_dotenv
 
+# Настройка логов, чтобы видеть ошибки в консоли
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
@@ -19,25 +20,13 @@ BOT_TOKEN = os.getenv("TELEGRAM_TOKEN").strip()
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-class AppState:
-    session: aiohttp.ClientSession = None
+# Глобальная сессия
+async def create_session():
+    return aiohttp.ClientSession()
 
-state = AppState()
-
-async def on_startup():
-    state.session = aiohttp.ClientSession()
-
-async def on_shutdown():
-    if state.session:
-        await state.session.close()
-
-async def get_face_description(image_base64):
-    """Gemini 2.0 (OpenRouter) анализирует черты лица"""
+async def get_face_description(session, image_base64):
     url = "https://openrouter.ai/api/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {OPENROUTER_KEY}"}
     payload = {
         "model": "google/gemini-2.0-flash-001",
         "messages": [{
@@ -48,93 +37,86 @@ async def get_face_description(image_base64):
             ]
         }]
     }
-    async with state.session.post(url, headers=headers, json=payload) as resp:
+    async with session.post(url, headers=headers, json=payload) as resp:
         result = await resp.json()
         return result['choices'][0]['message']['content'].strip()
 
-async def generate_with_img2img(original_bytes, description):
-    """Генерация ЧЕРЕЗ IMAGE-TO-IMAGE для сохранения схожести"""
-    # Используем эндпоинт ИМЕННО ДЛЯ IMAGE-TO-IMAGE
-    url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image"
-    
+async def generate_with_img2img(session, original_bytes, description):
+    url = f"https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/image-to-image"
     headers = {
         "Authorization": f"Bearer {STABILITY_KEY}",
         "Accept": "application/json"
     }
     
-    # Текст, описывающий ИЗМЕНЕНИЯ, которые мы хотим
-    prompt = f"Professional studio portrait of this specific person wearing a high-quality black formal suit and white shirt, solid neutral grey background, cinematic lighting, 8k resolution, photorealistic, sharp focus"
+    # Формируем данные через FormData (самый стабильный способ в aiohttp)
+    data = aiohttp.FormData()
+    data.add_field('text_prompts[0][text]', f"Professional studio portrait of this specific person, black formal suit, white shirt, grey background, 8k, photorealistic")
+    data.add_field('text_prompts[0][weight]', '1.0')
+    data.add_field('init_image', original_bytes, filename='init.png', content_type='image/png')
+    data.add_field('init_image_mode', 'IMAGE_STRENGTH')
+    data.add_field('image_strength', '0.40') # Баланс сходства
+    data.add_field('cfg_scale', '7')
+    data.add_field('samples', '1')
+    data.add_field('steps', '30')
 
-    # Параметры для Image-to-Image
-    # image_strength=0.35 — это КЛЮЧЕВОЙ параметр. Чем он выше (до 1), тем больше картинка похожа на оригинал.
-    # Значение 0.35-0.4 — хороший баланс между сохранением лица и изменением костюма.
-    data = {
-        "text_prompts[0][text]": prompt,
-        "text_prompts[0][weight]": 1,
-        "cfg_scale": 7,
-        "samples": 1,
-        "steps": 30,
-        "init_image_mode": "IMAGE_STRENGTH",
-        "image_strength": 0.38, # КЛЮЧ: Настройка "силы" оригинала (0.0 - 1.0)
-    }
+    async with session.post(url, headers=headers, data=data) as resp:
+        if resp.status != 200:
+            err = await resp.text()
+            logger.error(f"Stability Error: {err}")
+            return None
+        res_json = await resp.json()
+        return base64.b64decode(res_json['artifacts'][0]['base64'])
 
-    # Для Image-to-Image мы отправляем файл через multipart/form-data
-    with aiohttp.MultipartWriter('form-data') as mpwriter:
-        for key, value in data.items():
-            mpwriter.append_part(value, content_type='text/plain', headers={'Content-Disposition': f'form-data; name="{key}"'})
-        
-        mpwriter.append_part(original_bytes, content_type='image/png', headers={'Content-Disposition': f'form-data; name="init_image"; filename="origin.png"'})
+# --- ОБРАБОТЧИКИ ---
 
-        # Настраиваем запрос
-        url_mp = f"{url}?{mpwriter.headers['Content-Type'].split(';', 1)[1].strip()}"
-        async with state.session.post(url, headers=headers, data=mpwriter) as resp:
-            if resp.status != 200:
-                error_data = await resp.text()
-                logger.error(f"Stability AI Error: {error_data}")
-                return None
-            
-            data = await resp.json()
-            # Достаем base64 результат
-            image_base64 = data['artifacts'][0]['base64']
-            return base64.b64decode(image_base64)
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    await message.answer("👋 Бот запущен! Пришлите фото (как картинку), и я сделаю ретушь с сохранением сходства лица.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Анализирую внешность...")
+    status = await message.answer("⏳ 1/2 Анализирую лицо через Gemini...")
     
-    try:
-        # Качаем фото
-        file = await bot.get_file(message.photo[-1].file_id)
-        file_bytes = await bot.download_file(file.file_path)
-        
-        # Конвертируем в base64 только для Gemini
-        img_b64 = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
+    async with aiohttp.ClientSession() as session:
+        try:
+            file = await bot.get_file(message.photo[-1].file_id)
+            photo_bytes = await bot.download_file(file.file_path)
+            photo_data = photo_bytes.getvalue()
+            
+            # Анализ
+            img_b64 = base64.b64encode(photo_data).decode('utf-8')
+            desc = await get_face_description(session, img_b64)
+            
+            await status.edit_text("🎨 2/2 Генерация Image-to-Image (сохраняю сходство)...")
+            
+            # Генерация
+            final_image = await generate_with_img2img(session, photo_data, desc)
+            
+            if final_image:
+                await bot.send_photo(
+                    message.chat.id,
+                    BufferedInputFile(final_image, filename="res.png"),
+                    caption=f"✅ Готово! Сходство сохранено.\nОписание: {desc}"
+                )
+                await status.delete()
+            else:
+                await status.edit_text("❌ Ошибка при создании изображения. Проверьте лимиты Stability AI.")
+                
+        except Exception as e:
+            logger.error(f"Handler error: {e}")
+            await status.edit_text(f"❌ Произошла ошибка: {str(e)[:100]}")
 
-        # 1. Анализ лица
-        description = await get_face_description(img_b64)
-        await status.edit_text("🎨 Применяю Image-to-Image ретушь (Сохраняю лицо)...")
-
-        # 2. Генерация через Image-to-Image
-        final_image_bytes = await generate_with_img2img(file_bytes.getvalue(), description)
-
-        if final_image_bytes:
-            await bot.send_photo(
-                message.chat.id,
-                BufferedInputFile(final_image_bytes, filename="ritual.png"),
-                caption="✅ Ретушь готова. Использована технология Image-to-Image (сохранение схожести)."
-            )
-            await status.delete()
-        else:
-            await status.edit_text("❌ Ошибка генерации. Проверьте кредиты на Stability AI.")
-
-    except Exception as e:
-        logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Системная ошибка. Попробуйте снова.")
+# Универсальная ловушка, если команда не распознана
+@dp.message()
+async def any_message(message: types.Message):
+    await message.answer("Я получил ваше сообщение! Чтобы начать ретушь, просто пришлите мне ФОТОГРАФИЮ.")
 
 async def main():
-    dp.startup.register(on_startup)
-    dp.shutdown.register(on_shutdown)
+    logger.info("Бот запускается...")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Бот остановлен")
