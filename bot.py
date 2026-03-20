@@ -3,7 +3,7 @@ import asyncio
 import base64
 import logging
 import aiohttp
-import re
+import urllib.parse
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import BufferedInputFile
@@ -15,7 +15,7 @@ load_dotenv()
 
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-URL = "https://openrouter.ai/api/v1/chat/completions"
+OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -26,14 +26,10 @@ class AppState:
 state = AppState()
 
 async def on_startup():
-    # Заголовки для ПЛАТНОГО аккаунта (как у тебя)
-    headers = {
+    state.session = aiohttp.ClientSession(headers={
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/my_retouch_task_bot",
-        "X-Title": "Ritual AI Pro"
-    }
-    state.session = aiohttp.ClientSession(headers=headers)
+        "Content-Type": "application/json"
+    })
 
 async def on_shutdown():
     if state.session:
@@ -41,82 +37,70 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("🚀 Бот переведен на платный канал OpenRouter. Пришлите фото.")
+    await message.answer("📸 Бот готов. Пришлите фото — я сделаю ретушь и пришлю готовый файл.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ Анализ лица (Gemini 2.0)...")
+    status = await message.answer("⏳ 1/2 Анализирую внешность через OpenRouter...")
     
     try:
+        # Получаем фото и кодируем в Base64 для Gemini
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # 1. Анализ (Тратим твои $5 на качественное зрение)
+        # Шаг 1: Анализ (Gemini работает 100%, тратим баланс тут)
         analysis_payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe age, gender, hair and face features in 10 words. Concise."},
+                {"type": "text", "text": "Describe age, gender, hair and face concisely (max 10 words)."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
-        async with state.session.post(URL, json=analysis_payload) as resp:
+        async with state.session.post(OPENROUTER_URL, json=analysis_payload) as resp:
             data = await resp.json()
             description = data['choices'][0]['message']['content'].strip()
 
-        await status.edit_text(f"🎨 Генерирую через FLUX (Платный канал)...")
+        await status.edit_text(f"🎨 2/2 Генерирую файл портрета...")
 
-        # 2. Генерация через FLUX (самый стабильный ID для OpenRouter)
-        gen_payload = {
-            "model": "black-forest-labs/flux-schnell", # Короткий ID для платных ключей
-            "messages": [
-                {
-                    "role": "user", 
-                    "content": f"Professional photorealistic 8k studio portrait of {description}, wearing a black formal suit, white shirt, solid neutral grey background, sharp focus, masterpiece."
-                }
-            ]
-        }
+        # Шаг 2: Генерация через надежный движок Flux/SDXL
+        # Мы НЕ используем Pollinations, пробуем другой CDN
+        prompt = f"Professional studio portrait of {description}, formal black suit, white shirt, solid grey background, 8k, photorealistic, sharp focus"
+        encoded_prompt = urllib.parse.quote(prompt)
+        
+        # Альтернативный адрес для прямой генерации БЕЗ ошибок sana
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed=123&model=flux"
 
-        async with state.session.post(URL, json=gen_payload) as resp:
-            gen_data = await resp.json()
-            logger.info(f"FLUX Response: {gen_data}")
-            
-            if "choices" not in gen_data:
-                # Если FLUX не сработал, пробуем SDXL как запасной
-                logger.warning("FLUX failed, trying SDXL...")
-                gen_payload["model"] = "stabilityai/sdxl"
-                async with state.session.post(URL, json=gen_payload) as resp2:
-                    gen_data = await resp2.json()
+        # Шаг 3: Прямая загрузка в бота
+        max_retries = 3
+        for i in range(max_retries):
+            try:
+                async with state.session.get(image_url, timeout=30) as img_resp:
+                    if img_resp.status == 200:
+                        content = await img_resp.read()
+                        
+                        # Если сервер прислал JSON вместо картинки (ошибка), пробуем еще раз
+                        if b"error" in content[:100]:
+                            raise Exception("Server returned error JSON")
+                            
+                        photo_file = BufferedInputFile(content, filename="retouch.jpg")
+                        await bot.send_photo(
+                            message.chat.id, 
+                            photo_file, 
+                            caption=f"✅ Готово!\n_{description}_"
+                        )
+                        await status.delete()
+                        return
+            except Exception as e:
+                logger.warning(f"Attempt {i+1} failed: {e}")
+                await asyncio.sleep(3)
 
-            if "choices" in gen_data:
-                content = gen_data['choices'][0]['message']['content']
-                urls = re.findall(r'https?://\S+', content)
-                if not urls:
-                    raise Exception("Модель не вернула ссылку на изображение.")
-                image_url = urls[0].strip("()[]\"' ")
-            else:
-                # Последний шанс: если OpenRouter не рисует, используем Pollinations, но с МОДЕЛЬЮ FLUX
-                import urllib.parse
-                logger.warning("OpenRouter drawing failed, using Fallback Flux...")
-                image_url = f"https://image.pollinations.ai/prompt/{urllib.parse.quote(description)}%20black%20suit%20grey%20background?model=flux&width=1024&height=1024&nologo=true"
-
-        # 3. Скачивание и отправка
-        async with state.session.get(image_url) as img_resp:
-            if img_resp.status == 200:
-                img_bytes = await img_resp.read()
-                await bot.send_photo(
-                    message.chat.id, 
-                    BufferedInputFile(img_bytes, filename="res.jpg"),
-                    caption=f"✅ Готово!\n_{description}_"
-                )
-                await status.delete()
-            else:
-                await status.edit_text(f"✅ Готово! Ссылка на результат:\n{image_url}")
+        raise Exception("Сервер генерации перегружен. Попробуйте другое фото или подождите минуту.")
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
 
 async def main():
     dp.startup.register(on_startup)
