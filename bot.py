@@ -3,6 +3,7 @@ import asyncio
 import base64
 import logging
 import aiohttp
+import urllib.parse
 import re
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -29,8 +30,8 @@ async def on_startup():
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/ritual_retouch_bot",
-        "X-Title": "Ritual AI Expert"
+        "HTTP-Referer": "https://t.me/ritual_bot",
+        "X-Title": "Ritual Photo Fix"
     }
     state.session = aiohttp.ClientSession(headers=headers)
 
@@ -40,77 +41,69 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот готов. Начинаю поиск активной графической модели...")
+    await message.answer("📸 Ключ активен, баланс в порядке! Пришлите фото для обработки.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("🔍 Шаг 1: Анализ лица (Gemini)...")
+    status = await message.answer("⏳ Анализирую внешность через Gemini...")
     
     try:
+        # 1. Анализ фото (Тут твой баланс OpenRouter и тратится)
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Анализ (Gemini 2.0 работает стабильно)
-        payload = {
+        analysis_payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe age, hair and face concisely (10 words)."},
+                {"type": "text", "text": "Describe age, hair, and face features concisely (max 10 words). Output only text."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
-        async with state.session.post(URL, json=payload) as resp:
+        async with state.session.post(URL, json=analysis_payload) as resp:
             data = await resp.json()
+            if "choices" not in data:
+                raise Exception(f"OpenRouter Error: {data}")
             description = data['choices'][0]['message']['content'].strip()
+            # Очистка описания от мусора
+            description = re.sub(r'[^a-zA-Z0-9 ]', '', description)
 
-        await status.edit_text(f"🎨 Шаг 2: Поиск рабочей модели генерации...")
+        await status.edit_text(f"🎨 Генерирую ритуальный портрет...")
 
-        # Список ID моделей для перебора (OpenRouter постоянно их меняет)
-        model_variants = [
-            "black-forest-labs/flux-schnell", 
-            "stabilityai/sdxl", 
-            "openai/dall-e-3",
-            "google/gemini-2.0-pro-exp-02-15:free" # Резерв, если платные не пускают
-        ]
+        # 2. Формируем ссылку (Flux модель - самая мощная)
+        prompt = f"Professional studio portrait of {description}, formal black suit, white shirt, neutral grey background, high resolution, 8k, realistic"
+        encoded_prompt = urllib.parse.quote(prompt)
+        
+        # Используем мощный и быстрый инстанс Flux
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux"
 
-        final_url = None
-        for model_id in model_variants:
-            logger.info(f"Пробую модель: {model_id}")
-            gen_payload = {
-                "model": model_id,
-                "messages": [{"role": "user", "content": f"Professional studio portrait of {description}, wearing a black formal suit, solid grey background, 8k resolution, highly detailed."}]
-            }
-
+        # 3. Попытка скачивания с повторами (если сервер занят)
+        final_image = None
+        for attempt in range(3):
             try:
-                async with state.session.post(URL, json=gen_payload) as resp:
-                    gen_data = await resp.json()
-                    
-                    if "choices" in gen_data:
-                        content = gen_data['choices'][0]['message']['content']
-                        urls = re.findall(r'https?://\S+', content)
-                        if urls:
-                            final_url = urls[0].strip("()[]\"' ")
-                            logger.info(f"Успех с моделью {model_id}!")
-                            break
-                    else:
-                        logger.warning(f"Модель {model_id} отклонила запрос: {gen_data.get('error')}")
-            except Exception as e:
-                logger.error(f"Ошибка при вызове {model_id}: {e}")
+                async with state.session.get(image_url, timeout=25) as img_resp:
+                    if img_resp.status == 200:
+                        final_image = await img_resp.read()
+                        break
+                await asyncio.sleep(2) # Пауза перед повтором
+            except:
+                continue
 
-        if not final_url:
-            raise Exception("Ни одна графическая модель не приняла ваш API ключ. Проверьте баланс на сайте OpenRouter.")
-
-        # Скачивание
-        async with state.session.get(final_url) as img_resp:
-            final_bytes = await img_resp.read()
-
-        await bot.send_photo(message.chat.id, BufferedInputFile(final_bytes, filename="res.jpg"))
-        await status.delete()
+        if final_image:
+            await bot.send_photo(
+                message.chat.id,
+                BufferedInputFile(final_image, filename="res.jpg"),
+                caption=f"✅ Готово!\n_{description}_"
+            )
+            await status.delete()
+        else:
+            # Если скачать не вышло, даем прямую ссылку
+            await status.edit_text(f"✅ Готово! Нажмите на ссылку, чтобы открыть фото:\n\n{image_url}")
 
     except Exception as e:
-        logger.error(f"Ошибка: {e}")
-        await status.edit_text(f"❌ {str(e)[:150]}")
+        logger.error(f"Error: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
 
 async def main():
     dp.startup.register(on_startup)
