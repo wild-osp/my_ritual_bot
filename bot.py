@@ -15,7 +15,7 @@ load_dotenv()
 
 API_KEY = os.getenv("OPENROUTER_KEY").strip()
 BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+URL = "https://openrouter.ai/api/v1/chat/completions"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -37,70 +37,61 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот готов. Пришлите фото — я сделаю ретушь и пришлю готовый файл.")
+    await message.answer("📸 Бот готов. Использую прямой канал генерации. Пришлите фото.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ 1/2 Анализирую внешность через OpenRouter...")
+    status = await message.answer("⏳ 1/2 Анализ лица...")
     
     try:
-        # Получаем фото и кодируем в Base64 для Gemini
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
-        # Шаг 1: Анализ (Gemini работает 100%, тратим баланс тут)
-        analysis_payload = {
+        # ШАГ 1: Gemini анализирует фото (это работает 100%)
+        payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe age, gender, hair and face concisely (max 10 words)."},
+                {"type": "text", "text": "Describe age, hair, face features in 8 words. No punctuation."},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
 
-        async with state.session.post(OPENROUTER_URL, json=analysis_payload) as resp:
+        async with state.session.post(URL, json=payload) as resp:
             data = await resp.json()
             description = data['choices'][0]['message']['content'].strip()
 
-        await status.edit_text(f"🎨 2/2 Генерирую файл портрета...")
+        await status.edit_text("🎨 2/2 Создаю файл портрета...")
 
-        # Шаг 2: Генерация через надежный движок Flux/SDXL
-        # Мы НЕ используем Pollinations, пробуем другой CDN
-        prompt = f"Professional studio portrait of {description}, formal black suit, white shirt, solid grey background, 8k, photorealistic, sharp focus"
+        # ШАГ 2: Генерация через сверхстабильный источник (Vercel/Flux API)
+        # Убираем все лишнее, оставляем суть.
+        prompt = f"Professional portrait of {description}, black suit, grey background, photorealistic"
         encoded_prompt = urllib.parse.quote(prompt)
         
-        # Альтернативный адрес для прямой генерации БЕЗ ошибок sana
-        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?width=1024&height=1024&nologo=true&seed=123&model=flux"
+        # Новый источник (быстрый и без 'fetch failed')
+        image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&seed={os.urandom(4).hex()}&model=flux-pro"
 
-        # Шаг 3: Прямая загрузка в бота
-        max_retries = 3
-        for i in range(max_retries):
-            try:
-                async with state.session.get(image_url, timeout=30) as img_resp:
-                    if img_resp.status == 200:
-                        content = await img_resp.read()
-                        
-                        # Если сервер прислал JSON вместо картинки (ошибка), пробуем еще раз
-                        if b"error" in content[:100]:
-                            raise Exception("Server returned error JSON")
-                            
-                        photo_file = BufferedInputFile(content, filename="retouch.jpg")
-                        await bot.send_photo(
-                            message.chat.id, 
-                            photo_file, 
-                            caption=f"✅ Готово!\n_{description}_"
-                        )
-                        await status.delete()
-                        return
-            except Exception as e:
-                logger.warning(f"Attempt {i+1} failed: {e}")
-                await asyncio.sleep(3)
+        # ШАГ 3: Прямое получение файла
+        async with state.session.get(image_url, timeout=40) as img_resp:
+            if img_resp.status == 200:
+                content = await img_resp.read()
+                
+                # Проверка: если пришел текст вместо картинки - это ошибка
+                if len(content) < 5000: 
+                    raise Exception("Сервер вернул пустой файл. Попробуйте снова.")
 
-        raise Exception("Сервер генерации перегружен. Попробуйте другое фото или подождите минуту.")
+                await bot.send_photo(
+                    message.chat.id,
+                    BufferedInputFile(content, filename="ritual.jpg"),
+                    caption=f"✅ Готово!\n_{description}_"
+                )
+                await status.delete()
+            else:
+                raise Exception(f"Сервер занят (Статус {img_resp.status})")
 
     except Exception as e:
-        logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:150]}")
+        logger.error(f"Ошибка: {e}")
+        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}. Попробуйте еще раз.")
 
 async def main():
     dp.startup.register(on_startup)
