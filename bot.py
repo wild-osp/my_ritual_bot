@@ -29,9 +29,7 @@ state = AppState()
 async def on_startup():
     headers = {
         "Authorization": f"Bearer {API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://t.me/ritual_bot",
-        "X-Title": "Ritual AI Expert"
+        "Content-Type": "application/json"
     }
     state.session = aiohttp.ClientSession(headers=headers)
 
@@ -41,22 +39,22 @@ async def on_shutdown():
 
 @dp.message(Command("start"))
 async def start(message: types.Message):
-    await message.answer("📸 Бот готов к работе. Пришлите фото для ритуальной ретуши.")
+    await message.answer("📸 Бот готов. Режим коротких ссылок включен. Пришлите фото.")
 
 @dp.message(F.photo)
 async def handle_photo(message: types.Message):
-    status = await message.answer("⏳ 1/2 Анализирую лицо через Gemini...")
+    status = await message.answer("⏳ 1/2 Анализ лица...")
     
     try:
-        # 1. Анализ (уже проверено, работает!)
         file = await bot.get_file(message.photo[-1].file_id)
         file_bytes = await bot.download_file(file.file_path)
         base64_img = base64.b64encode(file_bytes.getvalue()).decode('utf-8')
 
+        # Запрос к Gemini: просим СУПЕР короткое описание
         payload = {
             "model": "google/gemini-2.0-flash-001",
             "messages": [{"role": "user", "content": [
-                {"type": "text", "text": "Describe this person's face for AI generation. Use 15-20 words, focus on age, wrinkles, and unique features. No intro."},
+                {"type": "text", "text": "Describe this person in 4 words only. No punctuation. Example: elderly bald man glasses"},
                 {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}}
             ]}]
         }
@@ -64,46 +62,37 @@ async def handle_photo(message: types.Message):
         async with state.session.post(URL, json=payload) as resp:
             data = await resp.json()
             description = data['choices'][0]['message']['content'].strip()
-            # Чистим описание для URL
-            clean_desc = re.sub(r'[^a-zA-Z0-9 ]', '', description)
+            # Очистка: только латиница и пробелы
+            description = re.sub(r'[^a-zA-Z ]', '', description)
 
-        await status.edit_text("🎨 2/2 Генерирую файл портрета (Flux)...")
+        await status.edit_text("🎨 2/2 Генерация фото...")
 
-        # 2. Формируем промпт для генерации
-        full_prompt = f"Professional studio portrait of {clean_desc}, wearing black formal suit, white shirt, neutral grey background, 8k, photorealistic"
-        encoded_prompt = urllib.parse.quote(full_prompt)
+        # Формируем максимально короткую и чистую ссылку
+        prompt_text = f"portrait of {description} in black suit on grey background 8k"
+        encoded_prompt = urllib.parse.quote(prompt_text)
         
-        # Используем путь /p/ и модель flux (этот вариант самый живучий)
-        image_url = f"https://pollinations.ai/p/{encoded_prompt}?width=1024&height=1024&nologo=true&model=flux&seed={os.urandom(2).hex()}"
+        # Ссылка БЕЗ лишних параметров, чтобы не злить сервер
+        image_url = f"https://image.pollinations.ai/prompt/{encoded_prompt}?model=flux&width=1024&height=1024&nologo=true&seed={os.urandom(2).hex()}"
 
-        # 3. Попытка скачать и отправить файл
-        try:
-            async with state.session.get(image_url, timeout=35) as img_resp:
-                if img_resp.status == 200:
-                    img_data = await img_resp.read()
-                    
-                    # Если вдруг пришла текстовая ошибка вместо картинки
-                    if len(img_data) < 5000:
-                        raise Exception("Ошибка сервера генерации")
-
+        # Попытка скачать
+        async with state.session.get(image_url, timeout=40) as img_resp:
+            if img_resp.status == 200:
+                img_data = await img_resp.read()
+                if len(img_data) > 10000: # Проверка, что это картинка, а не текст ошибки
                     await bot.send_photo(
                         message.chat.id,
-                        BufferedInputFile(img_data, filename="result.jpg"),
-                        caption="✅ Ретушь готова"
+                        BufferedInputFile(img_data, filename="res.jpg"),
+                        caption=f"✅ Готово!\n_{description}_"
                     )
                     await status.delete()
                     return
-        except Exception as e:
-            logger.warning(f"Download failed, giving link: {e}")
-            # Если не скачалось, даем ссылку, но ПРАВИЛЬНУЮ
-            await status.edit_text(
-                f"✅ Портрет готов!\n\nНе удалось загрузить файл в Telegram, но вы можете скачать его по ссылке:\n\n🔗 [ОТКРЫТЬ ПОРТРЕТ]({image_url})",
-                parse_mode="Markdown"
-            )
+
+        # Если не скачалось, даем ссылку текстом
+        await status.edit_text(f"✅ Готово! Нажмите, чтобы открыть:\n\n{image_url}")
 
     except Exception as e:
         logger.error(f"Error: {e}")
-        await status.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+        await status.edit_text(f"❌ Ошибка. Попробуйте еще раз.")
 
 async def main():
     dp.startup.register(on_startup)
