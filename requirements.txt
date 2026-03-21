@@ -3,3 +3,4 @@ openai
 aiohttp
 python-dotenv
 Pillow
+replicate
